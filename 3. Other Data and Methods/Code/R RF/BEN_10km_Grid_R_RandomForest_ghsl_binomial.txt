@@ -1,0 +1,914 @@
+####  Randon Forest in R
+
+setwd("/")
+
+#install.packages(c("sf", "terra"))
+
+library(readr)
+library(terra)
+library(randomForest)
+library(datasets)
+library(caret)
+library(sf)
+
+#install.packages(c("spatialRF", "randomForestExplainer", "pdp"))
+#install.packages("kableExtra")
+#install.packages("rnaturalearth")
+
+###https://blasbenito.github.io/spatialRF/
+
+library(spatialRF)
+library(kableExtra)
+library(rnaturalearth)
+library(tidyverse)
+library(randomForestExplainer)
+library(pdp)
+
+grid_data <- read.csv("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Gridded_10km_Data/Africa_Grid_Data_10km_ghsl.csv")
+head(grid_data)
+grid_data <- subset(grid_data, country == 1)
+
+names(grid_data)
+data <- grid_data[,-1]
+data <- na.omit(data)
+names(data)
+names(data)[c(9:16)] <- c("smod.10", "smod.11", "smod.12", "smod.13", "smod.21", "smod.22", "smod.23", "smod.30")
+data$SCHOOLS <- as.integer(ifelse(data$NUMPOINTS > 0, 1, 0))
+head(data)
+
+set.seed(23)
+random.seed <- 23
+
+dependent.variable.name <- "SCHOOLS"
+predictor.variable.names <- colnames(data)[c(4:6, 8:16)]
+
+xy <- data[, c("x", "y")]
+distance.matrix <- as.matrix(dist(xy), ncol = nrow(xy))
+head(distance.matrix)
+
+distance.thresholds <- c(0, 10000, 20000, 40000, 80000, 160000, 320000)
+
+ggplot() +
+    geom_raster(data, mapping = aes(x = x, y = y, fill = SCHOOLS))
+
+head(data)
+hist(data[,predictor.variable.names[12]])
+
+#data[,dependent.variable.name] <- as.numeric(data[,dependent.variable.name])
+
+class(data[,dependent.variable.name])
+
+
+
+for(i in 1:12){
+    print(class(data[,predictor.variable.names[i]]))
+    data[,predictor.variable.names[[i]]] <- as.numeric(data[,predictor.variable.names[[i]]])
+
+}
+
+#Plot response vs outcome
+spatialRF::plot_training_df(
+  data = data,
+  dependent.variable.name = dependent.variable.name,
+  predictor.variable.names = predictor.variable.names,
+  ncol = 3,
+  point.color = viridis::viridis(100, option = "F"),
+  line.color = "gray30"
+  )
+
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_spatialRF_binomial_responseVvariables.png")
+
+
+#Plot Moran's I to check for spatial autocorrelation
+spatialRF::plot_training_df_moran(
+  data = data,
+  dependent.variable.name = dependent.variable.name,
+  predictor.variable.names = predictor.variable.names,
+  distance.matrix = distance.matrix,
+  distance.thresholds = distance.thresholds,
+  fill.color = viridis::viridis(
+    100,
+    option = "F",
+    direction = -1
+    ),
+  point.color = "green"
+)
+
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_spatialRF_moranI_binomial.png")
+
+
+predictor.variable.names
+
+preference.order <- c(
+    "land", "pop", "built_s", "built_v",
+    "smod.30", "smod.23", "smod.22", "smod.21", "smod.13", "smod.12", "smod.11", "smod.10"
+  )
+
+#Reduce multicollinearity
+predictor.variable.names <- spatialRF::auto_cor(
+  x = data[, predictor.variable.names],
+  cor.threshold = 0.6,
+  preference.order = preference.order
+) %>% 
+  spatialRF::auto_vif(
+    vif.threshold = 2.5,
+    preference.order = preference.order
+  )
+
+predictor.variable.names$selected.variables
+n_features <- length(predictor.variable.names$selected.variables)
+
+# Find possible interactions
+# No interactions found
+'interactions <- spatialRF::the_feature_engineer(
+  data = data,
+  dependent.variable.name = dependent.variable.name,
+  predictor.variable.names = predictor.variable.names,
+  xy = xy,
+  importance.threshold = 0.50, #uses 50% best predictors
+  cor.threshold = 0.60, #max corr between interactions and predictors
+  seed = random.seed,
+  repetitions = 100,
+  verbose = TRUE
+  )
+
+kableExtra::kbl(
+  head(interactions$screening, 10),
+  format = "html"
+) %>%
+  kableExtra::kable_paper("hover", full_width = F)
+  
+#adding interaction column to the training data
+plant_richness_df <- interactions$data
+
+#adding interaction name to predictor.variable.names
+predictor.variable.names <- interactions$predictor.variable.names
+'
+#Fit non-spatial model
+model.non.spatial.binomial <- spatialRF::rf(
+  data = data,
+  dependent.variable.name = dependent.variable.name,
+  predictor.variable.names = predictor.variable.names,
+  distance.matrix = distance.matrix,
+  distance.thresholds = distance.thresholds,
+  xy = xy, #not needed by rf, but other functions read it from the model
+  seed = random.seed,
+  verbose = FALSE
+)
+
+spatialRF::plot_residuals_diagnostics(
+  model.non.spatial.binomial,
+  verbose = FALSE
+)
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_residuals_binomial.png")
+
+
+#Look at global variable importance
+spatialRF::plot_importance(
+  model.non.spatial.binomial,
+  verbose = FALSE
+)
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_importance_binomial.png")
+
+
+importance.df <- randomForestExplainer::measure_importance(
+  model.non.spatial.binomial,
+  measures = c("mean_min_depth", "no_of_nodes", "times_a_root", "p_value")
+)
+
+kableExtra::kbl(
+  importance.df %>% 
+    dplyr::arrange(mean_min_depth) %>% 
+    dplyr::mutate(p_value = round(p_value, 4)),
+  format = "html"
+) %>%
+  kableExtra::kable_paper("hover", full_width = F)
+
+#Contributions of predicts to transferability
+#i.e. predictive ability on independent spatial folds measured with rf_evaluate()
+model.non.spatial.binomial <- spatialRF::rf_importance(
+  model = model.non.spatial.binomial
+)
+
+names(model.non.spatial.binomial$importance)
+head(model.non.spatial.binomial$importance$per.variable)
+head(model.non.spatial.binomial$importance$local)
+
+model.non.spatial.binomial$importance$per.variable %>% 
+  ggplot2::ggplot() +
+  ggplot2::aes(
+    x = importance.oob,
+    y = importance.cv
+  ) + 
+  ggplot2::geom_point(size = 3) + 
+  ggplot2::theme_bw() +
+  ggplot2::xlab("Importance (out-of-bag)") + 
+  ggplot2::ylab("Contribution to transferability") + 
+  ggplot2::geom_smooth(method = "lm", formula = y ~ x, color = "red4")
+
+#Local variable importance
+local.importance <- spatialRF::get_importance_local(model.non.spatial.binomial)
+
+kableExtra::kbl(
+  round(local.importance[1:10,], 2),
+  format = "html"
+) %>%
+  kableExtra::kable_paper("hover", full_width = F)
+
+#adding coordinates
+local.importance <- cbind(
+  xy,
+  local.importance
+)
+
+head(local.importance)
+
+
+Africa <- st_read(dsn = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Shapefiles/Africa_Shapefile/Africa_Boundaries.shp")
+Africa_54009 <- st_transform(Africa, crs = "ESRI:54009")
+Benin <- subset(Africa_54009, ISO == "BEN")
+
+color.low <- viridis::viridis(3,option = "F")[2]
+color.high <- viridis::viridis(3,option = "F")[1]
+
+p1 <- ggplot(Benin) +
+    geom_sf() + coord_sf() + 
+    geom_raster(local.importance, mapping = aes(x = x, y = y, fill = land)) +
+    scale_fill_gradient2(
+        low = color.low, 
+        high = color.high
+    ) 
+
+p2 <- ggplot(Benin) +
+    geom_sf() + coord_sf() + 
+    geom_raster(local.importance, mapping = aes(x = x, y = y, fill = pop)) +
+    scale_fill_gradient2(
+        low = color.low, 
+        high = color.high
+    ) 
+
+p3 <- ggplot(Benin) +
+    geom_sf() + coord_sf() + 
+    geom_raster(local.importance, mapping = aes(x = x, y = y, fill = smod.23)) +
+    scale_fill_gradient2(
+        low = color.low, 
+        high = color.high
+    ) 
+
+library(ggpubr)
+ggarrange(p1, p2, p3, ncol = 3)
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_localimportance_binomial.png")
+
+
+#Response Curves
+
+spatialRF::plot_response_curves(
+  model.non.spatial.binomial,
+  quantiles = c(0.1, 0.5, 0.9),
+  line.color = viridis::viridis(
+    3, #same number of colors as quantiles
+    option = "F", 
+    end = 0.9
+    ),
+  ncol = 3, 
+  show.data = TRUE
+  )
+
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_responsecurves1_binomial.png")
+
+
+spatialRF::plot_response_curves(
+  model.non.spatial.binomial,
+  quantiles = 0.5,
+  ncol = 3
+  )
+
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_responsecurves2_binomial.png")
+
+
+#Partial dependence plots
+pdp::partial(
+  model.non.spatial.binomial, 
+  train = data, 
+  pred.var = "pop", 
+  plot = TRUE, 
+  grid.resolution = 1000
+  )
+
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_partialdependencepop_binomial.png")
+
+
+#Response curves
+reponse.curves.df <- spatialRF::get_response_curves(model.non.spatial.binomial)
+
+kableExtra::kbl(
+  head(reponse.curves.df, n = 10),
+  format = "html"
+) %>%
+  kableExtra::kable_paper("hover", full_width = F)
+
+#Interactions
+
+spatialRF::plot_response_surface(
+  model.non.spatial.binomial,
+  a = "pop",
+  b = "land"
+)
+
+#or
+pdp::partial(
+  model.non.spatial.binomial, 
+  train = data, 
+  pred.var = c("pop", "land"), 
+  plot = TRUE
+)
+
+#Model Performance
+spatialRF::print_performance(model.non.spatial.binomial)
+
+#Spatial Cross-Validation
+model.non.spatial.binomial <- spatialRF::rf_evaluate(
+  model = model.non.spatial.binomial,
+  xy = xy,                  #data coordinates
+  repetitions = 30,         #number of spatial folds
+  training.fraction = 0.75, #training data fraction on each fold
+  metrics = c("auc", "nrmse", "pseudo.r.squared", "r.squared",  "rmse"),
+  seed = random.seed,
+  verbose = FALSE
+)
+
+model.non.spatial.binomial2 <- spatialRF::rf_evaluate(
+  model = model.non.spatial.binomial,
+  xy = xy,                  #data coordinates
+  repetitions = 30,         #number of spatial folds
+  training.fraction = 0.75, #training data fraction on each fold
+  #metrics = c("nrmse", "auc"),
+  seed = random.seed,
+  verbose = FALSE
+)
+
+save(model.non.spatial.binomial, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_model_binomial.RData")
+load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_model_binomial.RData")
+View(model.non.spatial.binomial)
+View(model.non.spatial.binomial2)
+model.non.spatial.binomial2
+
+
+names(model.non.spatial.binomial$evaluation)
+
+spatialRF::plot_evaluation(model.non.spatial.binomial)
+
+spatialRF::print_evaluation(model.non.spatial.binomial)
+
+#Predictions
+data$NonSpatial.pred <- stats::predict(
+  object = model.non.spatial.binomial,
+  data = data,
+  type = "response"
+)$predictions
+
+ggplot(Benin) +
+    geom_sf() + coord_sf() + 
+    geom_raster(data, mapping = aes(x = x, y = y, fill = NonSpatial.pred)) +
+    scale_fill_viridis_c()
+unique(data)
+
+#Spatial autocorrelation of residuals
+#Not very stationary?
+#<0.05 means there is spatial autocorrelation
+spatialRF::plot_moran(
+  model.non.spatial.binomial, 
+  verbose = FALSE
+  )
+
+
+load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_model_binomial.RData")
+
+#Tuning
+model.non.spatial.binomial.tuned <- rf_tuning(
+  model = model.non.spatial.binomial,
+  xy = xy,
+  repetitions = 30,
+  num.trees = c(100, 200, 400, 800, 1600, 3200), #approx n_feature x 10
+  mtry = floor(n_features * c(.01, .025, .05, .15, .10, .25, .333, .4, .5)),
+  min.node.size = c(5, 10, 15),
+  seed = random.seed,
+  verbose = FALSE
+)
+
+save(model.non.spatial.binomial.tuned, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_tuned_model_binomial.RData")
+
+load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_tuned_model_binomial.RData")
+View(model.non.spatial.binomial.tuned)
+
+
+spatialRF::plot_residuals_diagnostics(
+  model.non.spatial.binomial.tuned,
+  verbose = FALSE
+)
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_residuals_binomial.png")
+
+
+#Look at global variable importance
+spatialRF::plot_importance(
+  model.non.spatial.binomial.tuned,
+  verbose = FALSE
+)
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_importance_binomial.png")
+
+
+importance.df <- randomForestExplainer::measure_importance(
+  model.non.spatial.binomial.tuned,
+  measures = c("mean_min_depth", "no_of_nodes", "times_a_root", "p_value")
+)
+
+kableExtra::kbl(
+  importance.df %>% 
+    dplyr::arrange(mean_min_depth) %>% 
+    dplyr::mutate(p_value = round(p_value, 4)),
+  format = "html"
+) %>%
+  kableExtra::kable_paper("hover", full_width = F)
+
+
+head(model.non.spatial.binomial.tuned)
+#Contributions of predicts to transferability
+#i.e. predictive ability on independent spatial folds measured with rf_evaluate()
+model.non.spatial.binomial.tuned <- spatialRF::rf_importance(
+  model = model.non.spatial.binomial.tuned
+)
+
+names(model.non.spatial.binomial.tuned$importance)
+head(model.non.spatial.binomial.tuned$importance$per.variable)
+head(model.non.spatial.binomial.tuned$importance$local)
+
+model.non.spatial.binomial.tuned$importance$per.variable %>% 
+  ggplot2::ggplot() +
+  ggplot2::aes(
+    x = importance.oob,
+    y = importance.cv
+  ) + 
+  ggplot2::geom_point(size = 3) + 
+  ggplot2::theme_bw() +
+  ggplot2::xlab("Importance (out-of-bag)") + 
+  ggplot2::ylab("Contribution to transferability") + 
+  ggplot2::geom_smooth(method = "lm", formula = y ~ x, color = "red4")
+
+#Local variable importance
+local.importance <- spatialRF::get_importance_local(model.non.spatial.binomial.tuned)
+
+kableExtra::kbl(
+  round(local.importance[1:10,], 2),
+  format = "html"
+) %>%
+  kableExtra::kable_paper("hover", full_width = F)
+
+#adding coordinates
+local.importance <- cbind(
+  xy,
+  local.importance
+)
+
+head(local.importance)
+
+
+Africa <- st_read(dsn = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Shapefiles/Africa_Shapefile/Africa_Boundaries.shp")
+Africa_54009 <- st_transform(Africa, crs = "ESRI:54009")
+Benin <- subset(Africa_54009, ISO == "BEN")
+
+color.low <- viridis::viridis(3,option = "F")[2]
+color.high <- viridis::viridis(3,option = "F")[1]
+
+p1 <- ggplot(Benin) +
+    geom_sf() + coord_sf() + 
+    geom_raster(local.importance, mapping = aes(x = x, y = y, fill = land)) +
+    scale_fill_gradient2(
+        low = color.low, 
+        high = color.high
+    ) 
+
+p2 <- ggplot(Benin) +
+    geom_sf() + coord_sf() + 
+    geom_raster(local.importance, mapping = aes(x = x, y = y, fill = pop)) +
+    scale_fill_gradient2(
+        low = color.low, 
+        high = color.high
+    ) 
+
+p3 <- ggplot(Benin) +
+    geom_sf() + coord_sf() + 
+    geom_raster(local.importance, mapping = aes(x = x, y = y, fill = smod.23)) +
+    scale_fill_gradient2(
+        low = color.low, 
+        high = color.high
+    ) 
+
+library(ggpubr)
+ggarrange(p1, p2, p3, ncol = 3)
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_tuned_localimportance_binomial.png")
+
+
+#Response Curves
+
+spatialRF::plot_response_curves(
+  model.non.spatial.binomial.tuned,
+  quantiles = c(0.1, 0.5, 0.9),
+  line.color = viridis::viridis(
+    3, #same number of colors as quantiles
+    option = "F", 
+    end = 0.9
+    ),
+  ncol = 3, 
+  show.data = TRUE
+  )
+
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_tuned_responsecurves1_binomial.png")
+
+
+spatialRF::plot_response_curves(
+  model.non.spatial.binomial.tuned,
+  quantiles = 0.5,
+  ncol = 3
+  )
+
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_tuned_responsecurves2_binomial.png")
+
+
+#Partial dependence plots
+pdp::partial(
+  model.non.spatial.binomial.tuned, 
+  train = data, 
+  pred.var = "pop", 
+  plot = TRUE, 
+  grid.resolution = 1000
+  )
+
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_tuned_partialdependencepop_binomial.png")
+
+
+#Response curves
+reponse.curves.df <- spatialRF::get_response_curves(model.non.spatial.binomial.tuned)
+
+kableExtra::kbl(
+  head(reponse.curves.df, n = 10),
+  format = "html"
+) %>%
+  kableExtra::kable_paper("hover", full_width = F)
+
+#Interactions
+
+spatialRF::plot_response_surface(
+  model.non.spatial.binomial.tuned,
+  a = "pop",
+  b = "land"
+)
+
+#or
+pdp::partial(
+  model.non.spatial.binomial.tuned, 
+  train = data, 
+  pred.var = c("pop", "land"), 
+  plot = TRUE
+)
+
+#Model Performance
+spatialRF::print_performance(model.non.spatial.binomial.tuned)
+
+#Spatial Cross-Validation
+model.non.spatial.binomial.tuned <- spatialRF::rf_evaluate(
+  model = model.non.spatial.binomial.tuned,
+  xy = xy,                  #data coordinates
+  repetitions = 30,         #number of spatial folds
+  training.fraction = 0.75, #training data fraction on each fold
+  metrics = "r.squared",
+  seed = random.seed,
+  verbose = FALSE
+)
+
+save(model.non.spatial.binomial.tuned, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_count_nonspatialRF_tuned_model_final_binomial.RData")
+
+
+names(model.non.spatial.binomial.tuned$evaluation)
+
+spatialRF::plot_evaluation(model.non.spatial.binomial.tuned)
+
+spatialRF::print_evaluation(model.non.spatial.binomial.tuned)
+
+#Predictions
+data$NonSpatial.pred <- stats::predict(
+  object = model.non.spatial.binomial.tuned,
+  data = data,
+  type = "response"
+)$predictions
+
+head(data)
+
+ggplot(Benin) +
+    geom_sf() + coord_sf() + 
+    geom_raster(data, mapping = aes(x = x, y = y, fill = NonSpatial.pred)) +
+    scale_fill_viridis_c()
+
+
+#Spatial autocorrelation of residuals
+#Not very stationary?
+#<0.05 means there is spatial autocorrelation
+spatialRF::plot_moran(
+  model.non.spatial.binomial.tuned, 
+  verbose = FALSE
+  )
+
+
+
+
+
+
+
+
+
+
+##### SPATIAL MODEl
+# Run spatial model
+model.spatial <- spatialRF::rf_spatial(
+  model = model.non.spatial.binomial,
+  method = "mem.moran.sequential", #default method
+  verbose = FALSE,
+  seed = random.seed
+)
+
+save(model.spatial, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/BEN_10km_school_SpatialRF.RData")
+
+
+#Check spatial autocorrelation of residuels
+#want >= 0.05 for all
+spatialRF::plot_moran(
+  model.spatial, 
+  verbose = FALSE
+  )
+
+
+p1 <- spatialRF::plot_importance(
+  model.non.spatial.binomial, 
+  verbose = FALSE) + 
+  ggplot2::ggtitle("Non-spatial model") 
+
+p2 <- spatialRF::plot_importance(
+  model.spatial,
+  verbose = FALSE) + 
+  ggplot2::ggtitle("Spatial model")
+
+p1 | p2 
+
+
+kableExtra::kbl(
+  head(model.spatial$importance$per.variable, n = 10),
+  format = "html"
+) %>%
+  kableExtra::kable_paper("hover", full_width = F)
+
+
+spatial.predictors <- spatialRF::get_spatial_predictors(model.spatial)
+pr <- data.frame(spatial.predictors, plant_richness_df[, c("x", "y")])
+
+
+p1 <- ggplot2::ggplot() +
+  ggplot2::geom_sf(data = Benin, fill = "white") +
+  ggplot2::geom_raster(
+    data = pr,
+    ggplot2::aes(
+      x = x,
+      y = y,
+      color = spatial_predictor_0_2
+    ),
+    size = 2.5
+  ) +
+  ggplot2::scale_fill_viridis_c(option = "F") +
+  ggplot2::theme_bw() +
+  ggplot2::labs(color = "Eigenvalue") +
+  ggplot2::scale_x_continuous(limits = c(-170, -30)) +
+  ggplot2::scale_y_continuous(limits = c(-58, 80))  +
+  ggplot2::ggtitle("Variable: spatial_predictor_0_2") + 
+  ggplot2::theme(legend.position = "bottom")+ 
+  ggplot2::xlab("Longitude") + 
+  ggplot2::ylab("Latitude")
+
+p2 <- ggplot2::ggplot() +
+  ggplot2::geom_sf(data = Benin, fill = "white") +
+  ggplot2::geom_raster(
+    data = pr,
+    ggplot2::aes(
+      x = x,
+      y = y,
+      fill = spatial_predictor_0_5,
+    ),
+    size = 2.5
+  ) +
+  ggplot2::scale_fill_viridis_c(option = "F") +
+  ggplot2::theme_bw() +
+  ggplot2::labs(color = "Eigenvalue") +
+  ggplot2::scale_x_continuous(limits = c(-170, -30)) +
+  ggplot2::scale_y_continuous(limits = c(-58, 80))  +
+  ggplot2::ggtitle("Variable: spatial_predictor_0_5") + 
+  ggplot2::theme(legend.position = "bottom") + 
+  ggplot2::xlab("Longitude") + 
+  ggplot2::ylab("")
+
+p1 | p2
+
+
+
+
+
+
+ind <- sample(2, nrow(data), replace = TRUE, prob = c(0.7, 0.3))
+train <- data[ind==1,]
+test <- data[ind==2,]
+
+
+
+par(mfrow = c(5,3))
+rf <- list()
+for (i in 1:14){
+    rf[[i]] <- readRDS(file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/", countries[[i]], "_10km_school_count_RF_AllVars_ghsl.rds", sep = ""))
+    plot(rf[[i]])
+}
+
+
+Africa <- st_read(dsn = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Shapefiles/Africa_Shapefile/Africa_Boundaries.shp")
+st_crs(Africa)
+#Africa <- st_transform(Africa, crs = "ESRI:54009")
+
+head(Africa)
+
+p1 <- list()
+trained <- list()
+p2 <- list()
+tested <- list()
+p3 <- list()
+predicted <- list()
+#AOI <- list()
+Africa_54009 <- st_transform(Africa, crs = "ESRI:54009")
+AOI <- subset(Africa_54009, ISO %in% countries)
+
+pred.data <- list()
+predicted.r <- list()
+pred.sf <- list()
+
+for (i in 1:14){
+    p1[[i]] <- predict(rf[[i]], train[[i]])
+    trained[[i]] <- cbind(p1[[i]], train[[i]])
+    confusionMatrix(p1[[i]], train[[i]]$SCHOOLS)
+
+    p2[[i]] <- predict(rf[[i]], test[[i]])
+    tested[[i]] <- cbind(p2[[i]], test[[i]]$SCHOOLS)
+    confusionMatrix(p2[[i]], test[[i]]$SCHOOLS)
+
+    p3[[i]] <- predict(rf[[i]], country.data[[i]])
+    predicted[[i]] <- cbind(p3[[i]], country.data[[i]])
+    confusionMatrix(p3[[i]], country.data[[i]]$SCHOOLS)
+    names(predicted[[i]])[1] <- "p3"
+    predicted[[i]]$diff <- as.factor(as.numeric(predicted[[i]]$p3) - as.numeric(predicted[[i]]$SCHOOLS))
+
+
+    #AOI[[i]] <- subset(Africa, ISO3 == countries[[i]])
+    #AOI[[i]] <- st_transform(AOI[[i]], crs = "ESRI:54009")
+
+    pred.sf[[i]] <- st_as_sf(predicted[[i]], coords = c("x","y"), crs = "ESRI:54009")
+    pred.country <- st_intersection(pred.sf[[i]], AOI)
+
+    pred.data[[i]] <- cbind(st_drop_geometry(pred.country), st_coordinates(pred.country))
+}
+
+pred.all <- do.call(rbind, pred.data)
+
+saveRDS(pred.all, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs_10km_school_count_RF_Pred_All_ghsl.RDS")
+
+
+
+names(pred.data[[1]])
+predicted.r <- list()
+for (i in 1:length(countries)){
+    data <- pred.data[[i]][,c(24,25,1:23)]
+    predicted.r[[i]] <- rast(data, type = "xyz", crs = "ESRI:54009")
+    country.r <- predicted.r[[i]]
+    saveRDS(country.r, file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/", countries[[i]], "_10km_school_count_RF_Pred_Raster_ghsl.RDS", sep = ""))
+
+}
+plot(predicted.r[[5]])
+
+
+#load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Africa_10km_school_count_RF_Pred_Raster.RData")
+
+
+#### probability prediction
+p4 <- list()
+predicted.probs <- list()
+prob.pred <- list()
+prob.pred.r <- list()
+for (i in 1:length(countries)){
+    p4[[i]] <- predict(rf[[i]], country.data[[i]], type = "prob")
+    predicted.probs[[i]] <- cbind(p4[[i]], country.data[[i]])
+
+    #AOI[[i]] <- subset(Africa, ISO3 == countries[[i]])
+    #AOI[[i]] <- st_transform(AOI[[i]], crs = "ESRI:54009")
+
+    pred.sf <- st_as_sf(predicted.probs[[i]], coords = c("x","y"), crs = "ESRI:54009")
+    st_crs(pred.sf) <- "ESRI:54009"
+    pred.country <- st_intersection(pred.sf, AOI)
+    pred.data <- cbind(st_drop_geometry(pred.country), st_coordinates(pred.country))
+
+    names(pred.data)
+    names(predicted.probs[[i]])
+    pred.prob.r <- rast(predicted.probs[[i]][,c(3,4,1,2,4:20)], type = 'xyz', crs = "ESRI:54009")
+    #pred.prob.r <- rast(pred.data[,c(43,44,1:42)], type = 'xyz', crs = "ESRI:54009")
+
+    plot(pred.prob.r)
+
+    pred.prob.data <- as.data.frame(pred.prob.r, cell = TRUE, xy = TRUE)
+    head(pred.prob.data)
+    names(pred.prob.data)
+
+    names(pred.prob.data)[c(4,5)] <- c("prob_0", "prob_1")
+    pred.prob.data$pred.schools <- ifelse(pred.prob.data$SCHOOLS == 1 | is.na(pred.prob.data$SCHOOLS), NA, pred.prob.data$prob_1)
+    hist(pred.prob.data$pred.schools)
+
+    head(pred.prob.data)
+    names(pred.prob.data)
+    prob.r <- rast(pred.prob.data[,c(2,3,1,4:23)], type = 'xyz', crs = "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs", digits = 6, extent = NULL)
+    plot(prob.r$pred.schools)
+
+    head(pred.prob.data)
+
+    quant <- quantile(pred.prob.data[,"prob_1"], probs = c(0.8, 0.9, 0.95, 0.975, 0.99, 0.999, 1), na.rm = TRUE)
+    quant[1]
+
+    pred.prob.data$sig.prob_0.2 <- ifelse(pred.prob.data$prob_1 < quant[1], NA, pred.prob.data$prob_1)
+    pred.prob.data$sig.prob_0.1 <- ifelse(pred.prob.data$prob_1 < quant[2], NA, pred.prob.data$prob_1)
+    pred.prob.data$sig.prob_0.05 <- ifelse(pred.prob.data$prob_1 < quant[3], NA, pred.prob.data$prob_1)
+    pred.prob.data$sig.prob_0.025 <- ifelse(pred.prob.data$prob_1 < quant[4], NA, pred.prob.data$prob_1)
+    pred.prob.data$sig.prob_0.01 <- ifelse(pred.prob.data$prob_1 < quant[5], NA, pred.prob.data$prob_1)
+    pred.prob.data$sig.prob_0.001 <- ifelse(pred.prob.data$prob_1 < quant[6], NA, pred.prob.data$prob_1)
+
+    prob.pred[[i]] <- pred.prob.data
+    save(pred.prob.data, file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Africa_10km_school_count_RF_Pred_Probs_ghsl_", countries[[i]],".RData", sep = ""))
+
+    names(pred.prob.data)
+    head(pred.prob.data)
+    prob.r <- rast(pred.prob.data[,c(2,3,1,4:29)], type = 'xyz', crs = "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs", digits = 6, extent = NULL)
+    prob.pred.r[[i]] <- prob.r
+}
+
+plot(prob.pred.r[[1]])
+plot(prob.pred.r[[1]]$sig.prob_0.05)
+head(prob.pred[[1]])
+
+library(stars)
+library(dplyr)
+
+Africa <- st_read(dsn = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Shapefiles/Africa_Shapefile/Africa_Boundaries.shp")
+names(Africa)
+st_crs(Africa)
+Africa_54009 <- st_transform(Africa, crs = "ESRI:54009")
+st_bbox(Africa_54009)
+-5875450    4514869
+
+range(pred.all$X)
+
+africa.r <- st_as_stars(st_rasterize(Africa_54009, crs = "ESRI:54009", 
+                nx = 930, ny = 1050, xlim = c(-2500000, 6800000), ylim = c(-5900000, 4600000)))
+
+plot(africa.r)
+countries.id <- unique(st_drop_geometry(Africa[,c("OBJECTID", "ISO")]))
+names(countries.id)
+
+prob.pred <- list()
+for(i in 1:14){
+    load(file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Africa_10km_school_count_RF_Pred_Probs_ghsl_", countries[[i]],".RData", sep = ""))
+    prob.pred[[i]] <- pred.prob.data
+
+    prob.pred[[i]]$OBJECTID <- st_extract(africa.r, st_as_sf(prob.pred[[i]], coords = c("x","y"), crs = "ESRI:54009"))$OBJECTID
+    prob.pred[[i]] <- left_join(prob.pred[[i]], countries.id, by = "OBJECTID")
+
+    prob.pred[[i]] <- subset(prob.pred[[i]], ISO == names(which.max(table(data.frame(factor(prob.pred[[i]]$ISO))))))
+    prob.pred.r[[i]] <- rast(prob.pred[[i]][,c(2,3,1,4:31)], type = 'xyz', crs = "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs", digits = 6, extent = NULL)
+
+}
+
+names(prob.pred[[1]])
+unique(prob.pred[[1]]$ISO)
+
+plot(prob.pred.r[[2]])
+
+
+par(mfrow = c(2,3))
+plot(prob.r$sig.prob_0.2)
+plot(prob.r$sig.prob_0.1)
+plot(prob.r$sig.prob_0.05)
+plot(prob.r$sig.prob_0.025)
+plot(prob.r$sig.prob_0.01)
+plot(prob.r$sig.prob_0.001)
+
+
+
+all.pred.prob <- do.call(rbind, prob.pred)
+save(all.pred.prob, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Africa_10km_school_count_RF_Pred_Probs_ghsl.RData")
+

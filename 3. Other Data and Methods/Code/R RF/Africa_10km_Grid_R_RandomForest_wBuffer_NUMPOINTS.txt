@@ -1,0 +1,210 @@
+####  Randon Forest in R
+
+setwd("/")
+
+library(readr)
+library(terra)
+library(randomForest)
+library(datasets)
+library(caret)
+library(sf)
+
+grid_data <- read.csv("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Gridded_10km_Data/Africa_Grid_Data_10km_wBuffer.csv")
+head(grid_data)
+
+
+names(grid_data)
+data <- grid_data[,-1]
+data <- na.omit(data)
+names(data)
+names(data)[c(9:16)] <- c("smod.10", "smod.11", "smod.12", "smod.13", "smod.21", "smod.22", "smod.23", "smod.30")
+data$SCHOOLS <- as.factor(ifelse(data$NUMPOINTS > 0, 1, 0))
+head(data)
+
+
+set.seed(23)
+
+countries <- c("BEN", "BWA", "GHA", "GIN", "KEN", "MWI", "NAM", "NER", "NGA", "RWA", "SLE", "SSD", "ZAF", "ZWE")
+unique(grid_data$country)
+
+country.data <- list()
+ind <- list()
+train <- list()
+test <- list()
+rf <- list()
+for (i in 1:14) {
+    country.data[[i]] <- subset(data, country == countries[[i]])
+    ind[[i]] <- sample(2, nrow(country.data[[i]]), replace = TRUE, prob = c(0.7, 0.3))
+    train[[i]] <- country.data[[i]][ind[[i]]==1,]
+    test[[i]] <- country.data[[i]][ind[[i]]==2,]
+
+    'rf[[i]] <- randomForest(NUMPOINTS ~ x + y + land + pop + built_s + built_v + smod.10 + smod.11 + smod.12 + smod.13 + smod.21 + smod.22 + smod.23 + smod.30, 
+                data = train[[i]], proximity = TRUE)
+
+
+    #save(rf[[i]], file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/", countries[[i]], "_10km_school_count_RF_AllVars_wBuffer_NUMPOINTS.RData", sep = ""))
+    saveRDS(rf[[i]], file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/", countries[[i]], "_10km_school_count_RF_AllVars_wBuffer_NUMPOINTS.rds", sep = ""))
+    '
+
+    #rf[[i]] <- readRDS(file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/", countries[[i]], "_10km_school_count_RF_AllVars_wBuffer_NUMPOINTS.rds", sep = ""))
+
+}
+
+rf[[1]]
+
+par(mfrow = c(1,1))
+plot(rf[[1]])
+
+par(mfrow = c(5,3))
+#rf <- list()
+for (i in 1:14){
+    #rf[[i]] <- readRDS(file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/", countries[[i]], "_10km_school_count_RF_AllVars_wBuffer_NUMPOINTS.rds", sep = ""))
+    plot(rf[[i]])
+}
+
+
+Africa <- st_read(dsn = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Shapefiles/Africa_Shapefile/Africa_Boundaries.shp")
+st_crs(Africa)
+#Africa <- st_transform(Africa, crs = "ESRI:54009")
+
+head(Africa)
+
+p1 <- list()
+trained <- list()
+p2 <- list()
+tested <- list()
+p3 <- list()
+predicted <- list()
+#AOI <- list()
+Africa_54009 <- st_transform(Africa, crs = "ESRI:54009")
+AOI <- subset(Africa_54009, ISO %in% countries)
+
+pred.data <- list()
+predicted.r <- list()
+pred.sf <- list()
+
+for (i in 1:14){
+    p1[[i]] <- predict(rf[[i]], train[[i]])
+    trained[[i]] <- cbind(p1[[i]], train[[i]])
+    #confusionMatrix(p1[[i]], train[[i]]$NUMPOINTS)
+
+    p2[[i]] <- predict(rf[[i]], test[[i]])
+    tested[[i]] <- cbind(p2[[i]], test[[i]]$NUMPOINTS)
+    #confusionMatrix(p2[[i]], test[[i]]$NUMPOINTS)
+
+    p3[[i]] <- predict(rf[[i]], country.data[[i]])
+    predicted[[i]] <- cbind(p3[[i]], country.data[[i]])
+    #confusionMatrix(p3[[i]], country.data[[i]]$NUMPOINTS)
+    names(predicted[[i]])[1] <- "p3"
+    predicted[[i]]$diff <- as.numeric(predicted[[i]]$p3) - as.numeric(predicted[[i]]$NUMPOINTS)
+
+
+    #AOI[[i]] <- subset(Africa, ISO3 == countries[[i]])
+    #AOI[[i]] <- st_transform(AOI[[i]], crs = "ESRI:54009")
+
+    pred.sf[[i]] <- st_as_sf(predicted[[i]], coords = c("x","y"), crs = "ESRI:54009")
+    pred.country <- st_intersection(pred.sf[[i]], AOI)
+
+    pred.data[[i]] <- cbind(st_drop_geometry(pred.country), st_coordinates(pred.country))
+}
+
+pred.all <- do.call(rbind, pred.data)
+
+saveRDS(pred.all, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs_10km_school_count_RF_Pred_All_NUMPOINTS.RDS")
+
+
+
+names(pred.data[[1]])
+predicted.r <- list()
+for (i in 1:14){
+    data <- pred.data[[i]][,c(25,26,1:24)]
+    predicted.r[[i]] <- rast(data, type = "xyz", crs = "ESRI:54009")
+    country.r <- predicted.r[[i]]
+    #saveRDS(country.r, file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/", countries[[i]], "_10km_school_count_RF_Pred_Raster_NUMPOINTS.RDS", sep = ""))
+
+}
+plot(predicted.r[[3]]$p3)
+
+#load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Africa_10km_school_count_RF_Pred_Raster_NUMPOINTS.RData")
+
+
+#### other models
+
+#https://bradleyboehmke.github.io/HOML/gbm.html#basic-gbm
+library(gbm)
+
+set.seed(23)
+
+countries <- c("BEN", "BWA", "GHA", "GIN", "KEN", "MWI", "NAM", "NER", "NGA", "RWA", "SLE", "SSD", "ZAF", "ZWE")
+unique(grid_data$country)
+
+country.data <- list()
+ind <- list()
+train <- list()
+test <- list()
+gbm <- list()
+for (i in 1:1) {
+    country.data[[i]] <- subset(data, country == countries[[i]])
+    ind[[i]] <- sample(2, nrow(country.data[[i]]), replace = TRUE, prob = c(0.7, 0.3))
+    train[[i]] <- country.data[[i]][ind[[i]]==1,]
+    test[[i]] <- country.data[[i]][ind[[i]]==2,]
+
+    gbm[[i]] <- gbm(formula = NUMPOINTS ~ x + y + land + pop + built_s + built_v + smod.10 + smod.11 + smod.12 + smod.13 + smod.21 + smod.22 + smod.23 + smod.30,
+                    data = train[[i]], distribution = "poisson",  # SSE loss function
+                    n.trees = 5000, shrinkage = 0.1, interaction.depth = 3,
+                    n.minobsinnode = 10, cv.folds = 10)
+
+}
+
+# find index for number trees with minimum CV error
+best <- which.min(gbm[[1]]$cv.error)
+best
+
+hist(gbm[[1]]$cv.error)
+
+# get MSE and compute RMSE
+sqrt(abs(gbm[[1]]$cv.error[best]))
+## [1] 23240.38
+
+# plot error curve
+gbm.perf(gbm[[1]], method = "cv")
+
+# create grid search
+hyper_grid <- expand.grid(
+  learning_rate = c(0.3, 0.1, 0.05, 0.01, 0.005),
+  RMSE = NA,
+  trees = NA,
+  time = NA
+)
+
+# execute grid search
+for(i in seq_len(nrow(hyper_grid))) {
+
+  # fit gbm
+  set.seed(23)  # for reproducibility
+  train_time <- system.time({
+    m <- gbm(formula = NUMPOINTS ~ x + y + land + pop + built_s + built_v + smod.10 + smod.11 + smod.12 + smod.13 + smod.21 + smod.22 + smod.23 + smod.30,
+      data = train[[1]],
+      distribution = "poisson",
+      n.trees = 5000, 
+      shrinkage = hyper_grid$learning_rate[i], 
+      interaction.depth = 3, 
+      n.minobsinnode = 10,
+      cv.folds = 10 
+   )
+  })
+  
+  # add SSE, trees, and training time to results
+  hyper_grid$RMSE[i]  <- sqrt(min(m$cv.error))
+  hyper_grid$trees[i] <- which.min(m$cv.error)
+  hyper_grid$Time[i]  <- train_time[["elapsed"]]
+
+}
+
+# results
+arrange(hyper_grid, RMSE)
+
+
+#https://e-sensing.github.io/sitsbook/
+
+#https://topepo.github.io/caret/index.html

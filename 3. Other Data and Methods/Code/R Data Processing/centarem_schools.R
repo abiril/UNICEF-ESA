@@ -1,0 +1,144 @@
+
+## Load packages
+
+library(sf)
+library(ggplot2)
+library(stars)
+library(ggpubr)
+#library(sp)
+
+## Load school data 
+
+schools <- st_read("Data/Brazil/Schools/schools_brazil.gpkg")
+schools_gov <- st_read("Data/Brazil/Schools/schools_brgov_54009.gpkg")
+schools_unicef <- st_read("Data/Brazil/Schools/schools_unicef_54009.gpkg")
+
+names(schools)
+names(schools_gov)
+names(schools_unicef)
+
+## Preliminary plots
+
+g1 <- ggplot(schools) +
+  geom_point(mapping = aes(x = lon, y = lat, size = pl_student_count, col = pl_school_type)) 
+
+g2 <- ggplot(schools_gov) +
+  geom_point(mapping = aes(x = Longitude, y = Latitude))
+
+g3 <- ggplot(schools_unicef) +
+  geom_point(mapping = aes(x = lon, y = lat))
+
+ggarrange(g1, g2, g3, nrow = 3, ncol = 1)
+
+## Joining the data
+
+schools$dataset <- "none"
+schools_gov$dataset <- "gov"
+schools_unicef$dataset <- "unicef"
+
+schools <- st_transform(schools, crs = st_crs(schools_gov))
+
+s1 <- schools[,c("lon", "lat", "pl_school_name", "dataset", "geom")]
+s2 <- schools_gov[,c("Longitude", "Latitude", "Escola", "dataset", "geom")]
+s3 <- schools_unicef[,c("lon", "lat", "name", "dataset", "geom")]
+
+names(s1)[3] <- "name"
+names(s2) <- c("lon", "lat", "name", "dataset", "geom")
+
+head(s1)
+head(s2)
+head(s3)
+
+s <- rbind(s1, s2, s3)
+
+unique(s$dataset)
+
+'ggplot(s) +
+  geom_point(mapping = aes(x = lon, y = lat, color = dataset)) +
+  coord_equal()'
+
+### I want to merge these so points with a less than the minimum distance are the "same" point and maybe check name?
+  
+ghsl.sp <- read_sf("Data/Brazil/Shapefiles/GHSL_data_54009_shapefile/GHSL2_0_MWD_L1_tile_schema_land.shp")
+
+ggplot(ghsl.sp) + 
+  geom_sf() + 
+  coord_sf()
+
+head(ghsl.sp)
+
+r10_c13 <- subset(ghsl.sp, tile_id == "R10_C13")
+st_bbox(r10_c13)
+st_crs(r10_c13)
+
+s <- st_crop(s, r10_c13)
+
+ggplot() +
+  geom_point(s, mapping = aes(x = lon, y = lat, color = dataset)) +
+  coord_equal()
+
+
+## Load GHSL data
+built_s100 <- read_stars("Data/Brazil/GHSL/GHS_BUILT_S_E2025_GLOBE_R2023A_54009_100_V1_0_R10_C13.tif")
+
+ggplot() +
+  geom_stars(data = built_s100) + 
+  #geom_point(s, mapping = aes(x = lon, y = lat, color = dataset)) +
+  coord_equal()
+
+st_bbox(built_s100)
+
+built_s100.df <- as.data.frame(built_s100)
+
+## Load S2 images
+
+#This is the whole GHSL grid square
+s2_0 <- read_stars("Data/Brazil/Images/brazil_schools_0.tif")
+
+clipped_centroids <- c(7,10,84,86,87,90,101:105,118:120,125,138:140,142,162:165,184,188,190,192:194,195,208:211,216,223,224,227:230,237:242,250,251,253,254,258,261:264,269,270,278:280,284,285,291,292, 297,298,300)
+clipped_centroids <- clipped_centroids - 1
+
+length(clipped_centroids)
+
+s2 <- list()
+s2[[1]] <- read_stars("Data/Brazil/Images/brazil_schools_7.tif")
+s2_stars <- read_stars("Data/Brazil/Images/brazil_schools_7.tif")
+st_crs(s2[[1]])
+
+for (i in 2:2) {
+  j = clipped_centroids[i]
+  s2[[i]] <- read_stars(paste("Data/Brazil/Images/brazil_schools_", j, ".tif", sep = ""))
+  s2[[i]] <- st_transform(s2[[i]], crs = st_crs(s2[[1]]))
+  s2_stars <- st_join(s2_stars, s2[[i]])
+}
+
+
+#For just Centarem (city):
+clipped_centroids <- c(277,228,238,241)
+clipped_centroids <- clipped_centroids - 1
+
+length(clipped_centroids)
+
+s2 <- list()
+s2[[1]] <- read_stars("UNICEF-ESA/Data/Brazil/Images/brazil_schools_276.tif")
+s2_stars <- read_stars("UNICEF-ESA/Data/Brazil/Images/brazil_schools_276.tif")
+st_crs(s2[[1]])
+
+for (i in 2:4) {
+  j = clipped_centroids[i]
+  s2[[i]] <- read_stars(paste("UNICEF-ESA/Data/Brazil/Images/brazil_schools_", j, ".tif", sep = ""))
+  s2[[i]] <- st_transform(s2[[i]], crs = st_crs(s2[[1]]))
+  s2_stars <- st_join(s2_stars, s2[[i]])
+}
+
+ggplot() +
+  geom_stars(data = s2_stars) 
+
+built_s100 <- st_crop(built_s100, s2_stars)
+s <- st_crop(s, s2_stars)
+
+ggplot() +
+  geom_stars(data = s2_stars) +
+  geom_point(s, mapping = aes(x = lon, y = lat, color = dataset)) +
+  coord_equal()
+

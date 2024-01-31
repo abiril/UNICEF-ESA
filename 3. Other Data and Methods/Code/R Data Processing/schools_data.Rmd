@@ -1,0 +1,189 @@
+---
+title: "schools_data_cleaning"
+author: "Abi Riley"
+date: "2023-09-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set-Up
+
+```{r packages}
+
+## Load packages
+
+library(sf)
+library(ggplot2)
+library(stars)
+library(ggpubr)
+library(mapview)
+library(readr)
+library(dplyr)
+library(tidygeocoder)
+#library(sp)
+
+```
+
+# Schools Data
+
+- schools_brgov: n = 216559 
+- schools_unicef: n = 175704
+
+```{r data, echo = FALSE}
+
+schools_gov <- st_read("UNICEF-ESA/Data/Brazil/Schools/schools_brgov_54009.gpkg")
+schools_unicef <- st_read("UNICEF-ESA/Data/Brazil/Schools/schools_unicef_54009.gpkg")
+
+```
+
+# Missing Coordinates
+
+Some government school entries do not have coordinate locations (n = 57817), instead we can geocode the addresses, which we have all of.
+
+```{r missing-coords}
+
+gov_missing <- subset(schools_gov, is.na(Latitude) | is.na(Longitude))
+gov_full <- subset(schools_gov, !is.na(Latitude) & !is.na(Longitude))
+
+names(gov_missing)
+gov_missing_w_add2 <- subset(gov_missing, !is.na(Endereço))
+
+```
+
+Using a loop to batch run the "geocode" function, using the 'arcgis' method. 
+
+WARNING: this takes AGES
+
+```{r geocode}
+
+
+school_missing <- subset(gov_missing_w_add[57001:57817,])
+filled_missing <- geocode(gov_missing_w_add, Endereço, method = 'arcgis', lat = Latitude.new , long = Longitude.new)
+save(filled_missing, file = "UNICEF-ESA/Data/Brazil/Schools/filled_gov_schools_arcgis.RData")
+
+
+for (i in 1:57){
+    start <- floor((i-1)*1000) + 1
+    end <- floor(i*1000)
+    school_missing <- subset(gov_missing_w_add[start:end,])
+    filled <- geocode(school_missing, Endereço, method = 'arcgis', lat = Latitude.new , long = Longitude.new)
+    filled_missing <- rbind(filled_missing, filled2)
+
+    save(filled_missing, file = paste("UNICEF-ESA/Data/Brazil/Schools/filled_gov_schools_arcgis_", i, ".RData", sep = ""))
+}
+
+
+save(filled_missing, file = "UNICEF-ESA/Data/Brazil/Schools/filled_gov_schools_arcgis.RData")
+
+```
+
+Add geocoded indicator
+
+```{r geocode-indicator}
+
+missing <- filled_missing[,-c(18,19)]
+names(missing)[c(19,20)] <- c("Latitude", "Longitude")
+missing <- missing[,c(1:17, 19, 20, 18)]
+
+names(gov_full) == names(missing)
+
+missing$geocoded <- "No"
+gov_full$geocoded <- "Yes"
+
+gov_schools <- rbind(missing, gov_full)
+
+save(gov_schools, file = "UNICEF-ESA/Data/Brazil/Schools/all_coords_gov_schools_arcgis.RData")
+
+still_missing <- subset(gov_schools, is.na(Latitude) | is.na(Longitude))
+
+```
+
+
+# Centroid Schools
+
+Some UNICEF school entries do not have the correct coordinates and are instead based on the centroid of the municipality.
+
+We want to change this, with this priority order:
+
+1. If available: Use government coords
+2. Geocode the address
+3. Leave as centroid, with an indicator
+
+First, get centroid locations from each municipality
+
+```{r centroid_locations}
+
+Brazil <- st_read("UNICEF-ESA/Data/Brazil/Shapefiles/Brazil_Admin_0_to_2/bra_admbnda_adm2_ibge_2020.shp")
+st_crs(Brazil) <- "+proj=longlat +datum=WGS84 +no_defs +type=crs"
+Brazil <- st_transform(Brazil, crs = "+proj=longlat +datum=WGS84 +no_defs +type=crs")
+
+sf_use_s2(FALSE)
+muni_centroids <- st_centroid(Brazil, of_largest_polygon = TRUE)
+
+centroids <- cbind(st_drop_geometry(muni_centroids), st_coordinates(muni_centroids))
+
+```
+
+Get municipality of each school
+
+```{r get_municipality}
+
+schools_unicef$unicef_id <- 1:nrow(schools_unicef)
+
+schools <- st_as_sf(schools_unicef, coords = c("lon", "lat"), crs = "+proj=longlat +datum=WGS84 +no_defs +type=crs")
+Brazil <- st_transform(Brazil, crs = st_crs(schools))
+muni <- Brazil[,c("ADM2_PT")]
+muni <- cbind(muni, 1:nrow(muni))
+names(muni)[2] <- "ID.muni"
+muni.df <- st_drop_geometry(muni)
+
+muni.r <- st_rasterize(muni)
+schools <- cbind(schools, st_extract(muni.r, schools)[1])
+names(schools)[32] <- "ID.muni"
+
+schools <- merge(schools, muni.df, by = "ID.muni")
+names(schools)[c(33,34)] <- c("Municipality", "geom")
+
+save(schools, file = "UNICEF-ESA/Data/Brazil/Schools/unicef_schools_municipality.RData")
+
+schools <- cbind(st_drop_geometry(schools), st_coordinates(schools$geom))
+schools.sf <- st_as_sf(schools)
+schools.sf <- st_transform(schools.sf, crs = "+proj=longlat +datum=WGS84 +no_defs +type=crs")
+schools <- cbind(st_drop_geometry(schools.sf), st_coordinates(schools.sf))
+schools <- schools[,-c(34,35)]
+
+schools <- merge(schools, centroids, by.x = "Municipality", by.y = "ADM2_PT", all.x = TRUE, all.y = FALSE)
+
+```
+
+Measure distance to municipality centroid
+
+```{r centroid_distance}
+
+
+schools$x.diff <- abs(schools$X.x - schools$X.y)
+schools$y.diff <- abs(schools$Y.x - schools$Y.y)
+
+hist(schools$x.diff)
+hist(schools$y.diff)
+
+```
+Get schools that are close to the centroids.
+
+Clear drop off around 0.0005 degrees, approximately 55.5m.
+
+n = 12653
+
+```{r centroid_schools}
+centroid_schools <- subset(schools, x.diff < 0.0005 & y.diff < 0.0005)
+hist(centroid_schools$x.diff)
+hist(centroid_schools$y.diff)
+
+schools$centroid <- ifelse(schools$x.diff < 0.0005 & schools$y.diff < 0.0005, 1, 0)
+```
+
+
+

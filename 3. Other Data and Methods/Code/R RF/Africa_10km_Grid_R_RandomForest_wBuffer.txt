@@ -1,0 +1,266 @@
+####  Randon Forest in R
+
+setwd("/")
+
+library(readr)
+library(terra)
+library(randomForest)
+library(datasets)
+library(caret)
+library(sf)
+
+grid_data <- read.csv("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Gridded_10km_Data/Africa_Grid_Data_10km_wBuffer.csv")
+head(grid_data)
+
+names(grid_data)
+data <- grid_data[,-1]
+data <- na.omit(data)
+names(data)
+names(data)[c(9:16)] <- c("smod.10", "smod.11", "smod.12", "smod.13", "smod.21", "smod.22", "smod.23", "smod.30")
+data$SCHOOLS <- as.factor(ifelse(data$NUMPOINTS > 0, 1, 0))
+head(data)
+
+#normalise data
+data[,c("x", "y", "land", "built_s", "built_v", "pop")] <- scale(data[,c("x", "y", "land", "built_s", "built_v", "pop")])
+
+head(data)
+
+set.seed(23)
+
+countries <- c("BEN", "BWA", "GHA", "GIN", "KEN", "MWI", "NAM", "NER", "NGA", "RWA", "SLE", "SSD", "ZAF", "ZWE")
+unique(grid_data$country)
+
+country.data <- list()
+ind <- list()
+train <- list()
+test <- list()
+rf <- list()
+for (i in 1:1) {
+    country.data[[i]] <- subset(data, country == countries[[i]])
+    ind[[i]] <- sample(2, nrow(country.data[[i]]), replace = TRUE, prob = c(0.7, 0.3))
+    train[[i]] <- country.data[[i]][ind[[i]]==1,]
+    test[[i]] <- country.data[[i]][ind[[i]]==2,]
+
+    rf[[i]] <- randomForest(SCHOOLS ~ x + y + land + pop + built_s + built_v + smod.10 + smod.11 + smod.12 + smod.13 + smod.21 + smod.22 + smod.23 + smod.30, 
+                data = train[[i]], proximity = TRUE)
+
+
+    #save(rf[[i]], file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/", countries[[i]], "_10km_school_count_RF_AllVars_wBuffer.RData", sep = ""))
+    #saveRDS(rf[[i]], file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/", countries[[i]], "_10km_school_count_RF_AllVars_wBuffer.rds", sep = ""))
+
+    #rf[[i]] <- readRDS(file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/", countries[[i]], "_10km_school_count_RF_AllVars_wBuffer.rds", sep = ""))
+
+}
+
+plot(rf[[1]])
+
+
+par(mfrow = c(5,3))
+rf <- list()
+for (i in 1:14){
+    rf[[i]] <- readRDS(file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/", countries[[i]], "_10km_school_count_RF_AllVars_wBuffer.rds", sep = ""))
+    plot(rf[[i]])
+}
+
+
+Africa <- st_read(dsn = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Shapefiles/Africa_Shapefile/Africa_Boundaries.shp")
+st_crs(Africa)
+#Africa <- st_transform(Africa, crs = "ESRI:54009")
+
+head(Africa)
+
+p1 <- list()
+trained <- list()
+p2 <- list()
+tested <- list()
+p3 <- list()
+predicted <- list()
+#AOI <- list()
+Africa_54009 <- st_transform(Africa, crs = "ESRI:54009")
+AOI <- subset(Africa_54009, ISO %in% countries)
+
+pred.data <- list()
+predicted.r <- list()
+pred.sf <- list()
+
+for (i in 1:14){
+    p1[[i]] <- predict(rf[[i]], train[[i]])
+    trained[[i]] <- cbind(p1[[i]], train[[i]])
+    confusionMatrix(p1[[i]], train[[i]]$SCHOOLS)
+
+    p2[[i]] <- predict(rf[[i]], test[[i]])
+    tested[[i]] <- cbind(p2[[i]], test[[i]]$SCHOOLS)
+    confusionMatrix(p2[[i]], test[[i]]$SCHOOLS)
+
+    p3[[i]] <- predict(rf[[i]], country.data[[i]])
+    predicted[[i]] <- cbind(p3[[i]], country.data[[i]])
+    confusionMatrix(p3[[i]], country.data[[i]]$SCHOOLS)
+    names(predicted[[i]])[1] <- "p3"
+    predicted[[i]]$diff <- as.factor(as.numeric(predicted[[i]]$p3) - as.numeric(predicted[[i]]$SCHOOLS))
+
+
+    #AOI[[i]] <- subset(Africa, ISO3 == countries[[i]])
+    #AOI[[i]] <- st_transform(AOI[[i]], crs = "ESRI:54009")
+
+    pred.sf[[i]] <- st_as_sf(predicted[[i]], coords = c("x","y"), crs = "ESRI:54009")
+    pred.country <- st_intersection(pred.sf[[i]], AOI)
+
+    pred.data[[i]] <- cbind(st_drop_geometry(pred.country), st_coordinates(pred.country))
+}
+
+pred.all <- do.call(rbind, pred.data)
+
+saveRDS(pred.all, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs_10km_school_count_RF_Pred_All.RDS", sep = ""))
+
+
+
+names(pred.data[[1]])
+predicted.r <- list()
+for (i in 1:14){
+    data <- pred.data[[i]][,c(43,44,1:19,23)]
+    predicted.r[[i]] <- rast(data, type = "xyz", crs = "ESRI:54009")
+    country.r <- predicted.r[[i]]
+    #saveRDS(country.r, file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/", countries[[i]], "_10km_school_count_RF_Pred_Raster.RDS", sep = ""))
+
+}
+plot(predicted.r[[3]])
+
+
+#load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Africa_10km_school_count_RF_Pred_Raster.RData")
+
+
+#### probability prediction
+p4 <- list()
+predicted.probs <- list()
+prob.pred <- list()
+prob.pred.r <- list()
+for (i in 1:14){
+    p4[[i]] <- predict(rf[[i]], country.data[[i]], type = "prob")
+    predicted.probs[[i]] <- cbind(p4[[i]], country.data[[i]])
+
+    #AOI[[i]] <- subset(Africa, ISO3 == countries[[i]])
+    #AOI[[i]] <- st_transform(AOI[[i]], crs = "ESRI:54009")
+
+    pred.sf <- st_as_sf(predicted.probs[[i]], coords = c("x","y"), crs = "ESRI:54009")
+    st_crs(pred.sf) <- "ESRI:54009"
+    pred.country <- st_intersection(pred.sf, AOI)
+    pred.data <- cbind(st_drop_geometry(pred.country), st_coordinates(pred.country))
+
+    names(pred.data)
+    head(predicted.probs[[i]])
+    pred.prob.r <- rast(predicted.probs[[i]][,c(3,4,1,2,4:21)], type = 'xyz', crs = "ESRI:54009")
+    #pred.prob.r <- rast(pred.data[,c(43,44,1:42)], type = 'xyz', crs = "ESRI:54009")
+
+    plot(pred.prob.r)
+
+    pred.prob.data <- as.data.frame(pred.prob.r, cell = TRUE, xy = TRUE)
+    head(pred.prob.data)
+    names(pred.prob.data)
+
+    names(pred.prob.data)[c(4,5)] <- c("prob_0", "prob_1")
+    pred.prob.data$pred.schools <- ifelse(pred.prob.data$SCHOOLS == 1 | is.na(pred.prob.data$SCHOOLS), NA, pred.prob.data$prob_1)
+    hist(pred.prob.data$pred.schools)
+
+    head(pred.prob.data)
+    names(pred.prob.data)
+    prob.r <- rast(pred.prob.data[,c(2,3,1,4:24)], type = 'xyz', crs = "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs", digits = 6, extent = NULL)
+    plot(prob.r$pred.schools)
+
+    head(pred.prob.data)
+
+    quant <- quantile(pred.prob.data[,"prob_1"], probs = c(0.8, 0.9, 0.95, 0.975, 0.99, 0.999, 1), na.rm = TRUE)
+    quant[1]
+
+    pred.prob.data$sig.prob_0.2 <- ifelse(pred.prob.data$prob_1 < quant[1], NA, pred.prob.data$prob_1)
+    pred.prob.data$sig.prob_0.1 <- ifelse(pred.prob.data$prob_1 < quant[2], NA, pred.prob.data$prob_1)
+    pred.prob.data$sig.prob_0.05 <- ifelse(pred.prob.data$prob_1 < quant[3], NA, pred.prob.data$prob_1)
+    pred.prob.data$sig.prob_0.025 <- ifelse(pred.prob.data$prob_1 < quant[4], NA, pred.prob.data$prob_1)
+    pred.prob.data$sig.prob_0.01 <- ifelse(pred.prob.data$prob_1 < quant[5], NA, pred.prob.data$prob_1)
+    pred.prob.data$sig.prob_0.001 <- ifelse(pred.prob.data$prob_1 < quant[6], NA, pred.prob.data$prob_1)
+
+    prob.pred[[i]] <- pred.prob.data
+    save(pred.prob.data, file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Africa_10km_school_count_RF_Pred_Probs_wBuffer_", countries[[i]],".RData", sep = ""))
+
+
+    head(pred.prob.data)
+    prob.r <- rast(pred.prob.data[,c(2,3,1,4:29)], type = 'xyz', crs = "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs", digits = 6, extent = NULL)
+    prob.pred.r[[i]] <- prob.r
+}
+
+head(prob.pred.r[[1]])
+plot(prob.pred.r[[1]]$sig.prob_0.05)
+head(prob.pred[[1]])
+
+library(stars)
+library(dplyr)
+
+Africa <- st_read(dsn = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Shapefiles/Africa_Shapefile/Africa_Boundaries.shp")
+names(Africa)
+st_crs(Africa)
+Africa_54009 <- st_transform(Africa, crs = "ESRI:54009")
+st_bbox(Africa_54009)
+-5875450    4514869
+
+range(pred.all$X)
+
+africa.r <- st_as_stars(st_rasterize(Africa_54009, crs = "ESRI:54009", 
+                nx = 930, ny = 1050, xlim = c(-2500000, 6800000), ylim = c(-5900000, 4600000)))
+
+plot(africa.r)
+countries.id <- unique(st_drop_geometry(Africa[,c("OBJECTID", "ISO")]))
+names(countries.id)
+
+for(i in 1:14){
+    load(file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Africa_10km_school_count_RF_Pred_Probs_wBuffer_", countries[[i]],".RData", sep = ""))
+    prob.pred[[i]] <- pred.prob.data
+
+    prob.pred[[i]]$OBJECTID <- st_extract(africa.r, st_as_sf(prob.pred[[i]], coords = c("x","y"), crs = "ESRI:54009"))$OBJECTID
+    prob.pred[[i]] <- left_join(prob.pred[[i]], countries.id, by = "OBJECTID")
+
+    prob.pred[[i]] <- subset(prob.pred[[i]], ISO == names(which.max(table(data.frame(factor(prob.pred[[i]]$ISO))))))
+    prob.pred.r[[i]] <- rast(prob.pred[[i]][,c(2,3,1,4:32)], type = 'xyz', crs = "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs", digits = 6, extent = NULL)
+
+}
+
+names(prob.pred[[1]])
+unique(prob.pred[[1]]$ISO)
+
+plot(prob.pred.r[[2]])
+
+
+par(mfrow = c(2,3))
+plot(prob.r$sig.prob_0.2)
+plot(prob.r$sig.prob_0.1)
+plot(prob.r$sig.prob_0.05)
+plot(prob.r$sig.prob_0.025)
+plot(prob.r$sig.prob_0.01)
+plot(prob.r$sig.prob_0.001)
+
+
+all.pred <- do.call(rbind, predicted.probs)
+ggplot(Africa$geometry) + geom_sf() + coord_sf() + 
+    geom_point(all.pred, mapping = aes(x = x, y = y))
+
+st_crs(Africa)
+
+ggplot(AOI[[14]]$geometry) + geom_sf() + coord_sf() + 
+    geom_point(country.data[[14]], mapping = aes(x = x, y = y))
+
+all.pred.prob <- do.call(rbind, prob.pred)
+save(all.pred.prob, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Africa_10km_school_count_RF_Pred_Probs_wBuffer.RData")
+
+head(all.pred.prob)
+head(prob.pred[[2]])
+
+### need to crop to countries
+
+head(all.pred.prob)
+p1 <- ggplot() +
+    #geom_sf() + coord_sf() +
+    geom_raster(all.pred.prob, mapping = aes(x = x, y = y, color = pred.schools, fill = sig.prob_0.025)) +
+    scale_fill_viridis_c(option = "C") +
+    facet_wrap(~ ISO, scales = "free")
+p1
+
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Africa_10km_school_count_RF_Pred_Probs_wBuffer_95plot.png", plot = p1)
+

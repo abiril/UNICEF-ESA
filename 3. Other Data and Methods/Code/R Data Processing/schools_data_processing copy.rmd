@@ -1,0 +1,479 @@
+---
+title: "schools_data_cleaning"
+author: "Abi Riley"
+date: "2023-09-18"
+output: github_output
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set-Up
+
+```{r packages}
+
+install.packages(c("sf", "ggplot2", "stars", "ggpubr", "readr", "dplyr", "tidygeocoder", "tidyr"), dep = TRUE)
+
+install.packages("Rcpp")
+
+## Load packages
+
+library(ggplot2)
+
+library(ggpubr)
+#library(mapview)
+library(readr)
+library(dplyr)
+library(tidygeocoder)
+library(tidyr)
+#library(sp)
+library(Rcpp)
+
+library(remotes)
+
+options(
+	configure.args = list(
+	    udunits2 = "--with-udunits2-include=/usr/include/udunits2"
+	)	
+)
+
+library(remotes)
+#install_github("r-spatial/sf", configure.args = "--with-proj-lib=$(brew --prefix)/lib/")
+
+library(sf)
+library(stars)
+
+```
+
+Was very difficult to install sf and stars, used this:
+
+sudo add-apt-repository ppa:ubuntugis/ubuntugis-unstable
+sudo apt-get update
+sudo apt-get install libudunits2-dev libgdal-dev libgeos-dev libproj-dev libsqlite0-dev
+
+
+# Schools Data
+
+- schools_brgov: n = 216559 
+- schools_unicef: n = 175704
+
+```{r data, echo = FALSE}
+
+schools_unicef1 <- st_read("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/schools_unicef_54009.gpkg")
+schools_unicef2 <- read.csv("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/BRA_school_geolocation_coverage_master.csv")
+
+load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/all_coords_gov_schools_arcgis.RData")
+
+```
+
+# Combining UNICEF?
+
+There are some differences in the names of schools, one is not a subset of the other.
+
+Merge and take the more recent data as priority
+
+```{r unicef, echo = FALSE}
+
+names(schools_unicef1)
+names(schools_unicef2)
+
+shared_names <- c(names(schools_unicef1)[names(schools_unicef1) %in% names(schools_unicef2)])
+shared_names
+
+head(schools_unicef1[,shared_names])
+head(schools_unicef2[,shared_names])
+
+nrow(schools_unicef1)
+length(schools_unicef2$name[schools_unicef2$name %in% schools_unicef1$name])
+
+nrow(schools_unicef2)
+length(schools_unicef1$name[schools_unicef1$name %in% schools_unicef2$name])
+
+schools_unicef <- merge(schools_unicef1, schools_unicef2, by = c("giga_id_school"), all = TRUE)
+
+names(schools_unicef)
+
+all_schools$Y.chosen <- ifelse(is.na(all_schools$Latitude), all_schools$lat, all_schools$Latitude)
+
+schools_unicef$name.x == schools_unicef$name.y
+#View(schools_unicef[,c("name.x", "name.y")])
+
+schools_unicef$name <- ifelse(is.na(schools_unicef$name.y), schools_unicef$name.x, schools_unicef$name.y)
+schools_unicef$lat <- ifelse(is.na(schools_unicef$lat.y), schools_unicef$lat.x, schools_unicef$lat.y)
+schools_unicef$lon <- ifelse(is.na(schools_unicef$lon.y), schools_unicef$lon.x, schools_unicef$lon.y)
+schools_unicef$computer_availability <- ifelse(is.na(schools_unicef$computer_availability.y), schools_unicef$computer_availability.x, schools_unicef$computer_availability.y)
+schools_unicef$school_type <- ifelse(is.na(schools_unicef$school_type.y), schools_unicef$school_type.x, schools_unicef$school_type.y)
+schools_unicef$school_region <- ifelse(is.na(schools_unicef$school_region.y), schools_unicef$school_region.x, schools_unicef$school_region.y)
+schools_unicef$connectivity <- ifelse(is.na(schools_unicef$connectivity.y), schools_unicef$connectivity.x, schools_unicef$connectivity.y)
+schools_unicef$connectivity_speed <- ifelse(is.na(schools_unicef$connectivity_speed.y), schools_unicef$connectivity_speed.x, schools_unicef$connectivity_speed.y)
+schools_unicef$coverage_type <- ifelse(is.na(schools_unicef$coverage_type.y), schools_unicef$coverage_type.x, schools_unicef$coverage_type.y)
+schools_unicef$coverage_type <- ifelse(is.na(schools_unicef$coverage_type.y), schools_unicef$coverage_type.x, schools_unicef$coverage_type.y)
+
+names(schools_unicef)
+head(schools_unicef)
+
+schools_unicef <- schools_unicef[,c(1:6, 10:17, 25:27, 35:36, 43:47, 49:52, 57:86)]
+
+save(schools_unicef, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/schools_all_uniced")
+load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/schools_all_uniced")
+
+unique(is.na(schools_unicef$lat))
+
+```
+
+
+# Centroid Schools
+
+Some UNICEF school entries do not have the correct coordinates and are instead based on the centroid of the municipality.
+
+We want to change this, with this priority order:
+
+1. If available: Use government coords
+2. Geocode the address
+3. Leave as centroid, with an indicator
+
+First, get centroid locations from each municipality
+
+```{r centroid_locations}
+
+Brazil <- st_read("/home/azureuser/cloudfiles/code/Users/ariley/Data/Shapefiles/Brazil_Admin_0_to_2/bra_admbnda_adm2_ibge_2020.shp")
+st_crs(Brazil) <- "+proj=longlat +ellps=GRS80 +no_defs +type=crs" ##from source
+Brazil <- st_transform(Brazil, crs = "+proj=longlat +datum=WGS84 +no_defs +type=crs")
+#st_crs(Brazil) <- "+proj=longlat +datum=WGS84 +no_defs +type=crs"
+Brazil <- st_transform(Brazil, crs = "+proj=longlat +datum=WGS84 +no_defs +type=crs")
+
+
+sf_use_s2(FALSE)
+muni_centroids <- st_centroid(Brazil, of_largest_polygon = TRUE)
+
+centroids <- cbind(st_drop_geometry(muni_centroids), st_coordinates(muni_centroids))
+
+```
+
+
+Get municipality of each school.
+
+```{r get_municipality_unicef}
+
+schools_unicef$unicef_id <- 1:nrow(schools_unicef)
+
+schools.df <- as.data.frame(st_drop_geometry(schools_unicef))
+schools.df$x <- schools.df$lon
+schools.df$y <- schools.df$lat
+
+schools <- st_as_sf(schools.df, coords = c("lon", "lat"), crs = "+proj=longlat +datum=WGS84 +no_defs +type=crs")
+Brazil <- st_transform(Brazil, crs = st_crs(schools))
+muni <- Brazil[,c("ADM2_PT")]
+muni <- cbind(muni, 1:nrow(muni))
+names(muni)[2] <- "ID.muni"
+muni.df <- st_drop_geometry(muni)
+
+muni.r <- st_rasterize(muni)
+
+names(schools)
+schools <- st_as_sf(schools)
+
+st_crs(muni.r)
+extract <- st_extract(muni.r, schools)
+
+schools <- cbind(schools, st_extract(muni.r, schools)[1])
+unique(is.na(schools$ID.muni))
+
+par(mfrow = c(1,1))
+plot(schools[,c("geometry", "ID.muni")], col = schools$ID.muni)
+
+unique(schools$admin1)
+schools_missing <- subset(schools, is.na(ID.muni))[,-61]
+plot(schools_missing[,c("geometry")]) #, col = schools_missing$ID.muni)
+
+schools <- subset(schools, !is.na(ID.muni))
+#muni2 <- st_nearest_feature(schools, muni)
+
+names(schools_missing)
+missing_municipality <- cbind(schools_missing[,-59], muni[st_nearest_feature(schools_missing, muni), c("ID.muni", "ADM2_PT")])[,-62]
+names(missing_municipality)
+names(missing_municipality)[60] <- "Municipality"
+
+names(muni.df)
+schools <- schools[,-61]
+schools2 <- merge(schools, muni.df[,c("ADM2_PT", "ID.muni")], by = "ID.muni", x.all = TRUE)
+names(schools2)
+names(schools2)[60] <- "Municipality"
+
+schools2 <- schools2[,names(missing_municipality)]
+names(schools2) == names(missing_municipality)
+
+schools <- rbind(schools2, missing_municipality)
+
+save(schools, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/all_unicef_schools_municipality.RData")
+load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/all_unicef_schools_municipality.RData")
+
+class(schools)
+names(schools)
+
+schools.sf <- st_transform(schools, crs = "+proj=longlat +datum=WGS84 +no_defs +type=crs")
+schools <- cbind(st_drop_geometry(schools.sf), st_coordinates(schools.sf))
+names(schools)
+schools <- schools[,-c(61,62)]
+
+names(centroids)
+centroids <- unique(centroids[,c("ADM2_PT", "X", "Y")])
+names(centroids)[1] <- "Municipality"  
+names(schools)
+centroids <- distinct(centroids)
+schools2 <- merge(schools, centroids, by = "Municipality", all = FALSE)
+
+schools <- left_join(schools %>% distinct(giga_id_school, .keep_all = TRUE),
+                 centroids %>% distinct(Municipality, .keep_all = TRUE), by= "Municipality")
+```
+
+Measure distance to municipality centroid
+
+```{r centroid_distance}
+
+names(schools)
+schools$x.diff <- abs(schools$x - schools$X)
+schools$y.diff <- abs(schools$y - schools$Y)
+
+hist(schools$x.diff)
+hist(schools$y.diff)
+
+```
+Get schools that are close to the centroids.
+
+Clear drop off around 0.0005 degrees, approximately 55.5m.
+
+n = 12653
+
+```{r centroid_schools}
+centroid_schools <- subset(schools, x.diff < 0.0005 & y.diff < 0.0005)
+hist(centroid_schools$x.diff)
+hist(centroid_schools$y.diff)
+
+schools$centroid <- ifelse(schools$x.diff < 0.0005 & schools$y.diff < 0.0005, 1, 0)
+names(schools)
+names(schools)[c(69:72)] <- c("X", "Y", "X_centroid", "Y_centroid")
+
+save(schools,  file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/all_unicef_schools_centroids.RData")
+```
+
+# Merge Datasets
+
+Merge datasets on name and municipality. We can see that the locations are all very close, which is great.
+
+```{r merge_schools}
+
+load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/all_unicef_schools_centroids.RData")
+head(schools)
+unique(is.na(schools$Municipality))
+
+schools.df <- st_drop_geometry(schools)
+
+schools.df2 <- st_drop_geometry(gov_schools)
+unique(schools.df2$Municipality)
+names(schools.df)
+names(schools.df2)
+
+all_schools <- merge(schools.df, schools.df2, by.x = c("name", "Municipality"), by.y = c("Escola","Município"), all = TRUE)
+unique(is.na(all_schools$Municipality))
+
+par(mfrow = c(1,2))
+plot(all_schools$y, all_schools$Latitude)
+plot(all_schools$x, all_schools$Longitude)
+
+save(all_schools, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/all_merged_schools2.RData")
+
+load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/all_merged_schools2.RData")
+unique(is.na(all_schools$ID.muni))
+
+```
+
+Now look at column names: what is the same? what is different? which has priority?
+
+Exactly the same:
+escola - name
+Localização - school_region
+dependência administrativa - school_type
+
+Same meaning, different value:
+latitude - lat
+longitude - lon
+porte da escola	- student_count
+
+```{r data_columns}
+
+names(all_schools)
+
+```
+
+# Choosing coordinates
+
+Priority list:
+1. Government locations (raw or geocoded)
+2. UNICEF actual location
+3. Geocoded UNICEF school
+4. Centroid
+
+
+```{r priority_coords}
+
+all_schools$gov <- ifelse(is.na(all_schools$Latitude), "No", "Yes")
+
+all_schools$X.chosen <- ifelse(is.na(all_schools$Longitude), all_schools$x, all_schools$Longitude)
+all_schools$Y.chosen <- ifelse(is.na(all_schools$Latitude), all_schools$y, all_schools$Latitude)
+
+
+unique(all_schools[,c("gov", "geocoded", "centroid")])
+
+all_schools$geocoded <- all_schools$geocoded %>% replace_na("No")
+all_schools$centroid <- all_schools$centroid %>% replace_na(0)
+
+unique(all_schools[,c("gov", "geocoded", "centroid")])
+
+
+```
+
+Geocode school locations that are currently centroids, n = 2837
+
+Make address and then use geocode
+
+```{r geocode_centroid_schools}
+
+centroid_schools <- subset(all_schools, gov == "No" & geocoded == "No" & centroid == 1)
+
+centroid_schools$address <- paste(centroid_schools$name, ", ", centroid_schools$Municipality, ", ", centroid_schools$ADM1_PT, ", Brazil", sep = "")
+centroid_schools$address
+
+geocoded_centroid_schools <- geocode(centroid_schools, address,
+                method = 'arcgis', lat = Latitude.new , long = Longitude.new)
+
+geocoded_centroid_schools$Latitude.new
+geocoded_centroid_schools$Longitude.new
+
+save(geocoded_centroid_schools, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/geocoded_centroids2.RData")
+load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/geocoded_centroids2.RData")
+
+
+geocoded_centroid_schools$X.chosen <- geocoded_centroid_schools$Longitude.new
+geocoded_centroid_schools$Y.chosen <- geocoded_centroid_schools$Latitude.new
+
+geocoded_centroid_schools$geocoded <- "Yes_2nd"
+geocoded_centroid_schools <- geocoded_centroid_schools[,names(all_schools)]
+
+other_schools <- subset(all_schools, !(gov == "No" & geocoded == "No" & centroid == 1))
+all_schools <- rbind(other_schools, geocoded_centroid_schools)
+
+
+unique(is.na(all_schools$X.chosen))
+unique(is.na(all_schools$Y.chosen))
+
+
+```
+
+Final, all locations: N = 304,972
+
+Label each one with where it came from 
+
+```{r coord_labels}
+unique(all_schools$geocoded)
+
+all_schools$coord_source <- ifelse(all_schools$geocoded == "Yes_2nd", "2nd_geocode", 
+    ifelse(all_schools$gov == "Yes" & all_schools$geocoded == "No", "gov", 
+        ifelse(all_schools$gov == "No", "unicef", "1st_geocode")))
+
+unique(all_schools$coord_source)
+
+save(all_schools, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/complete_all_schools2.RData")
+
+load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/complete_all_schools2.RData")
+
+nrow(all_schools)
+nrow(unique(all_schools[,c("name", "X.chosen", "Y.chosen")]))
+
+geo1 <- subset(all_schools, geocoded == "Yes_2nd")
+nrow(geo1)
+nrow(unique(geo1[,c("X.chosen", "Y.chosen")]))
+
+unique(all_schools$geocoded)
+
+names(all_schools)
+dups <- all_schools[duplicated(all_schools[,c("name", "X.chosen", "Y.chosen")]), ]
+dup_all <- subset(all_schools, X.chosen %in% dups$X.chosen & Y.chosen %in% dups$Y.chosen & name %in% dups$name)
+
+non_dup_all <- all_schools[!duplicated(all_schools[,c("name", "X.chosen", "Y.chosen")]), ]
+nrow(non_dup_all)
+
+all_schools <- non_dup_all
+save(all_schools, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/complete_all_schools3.RData")
+
+nrow(all_schools)
+
+#st_write(all_schools, "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/complete_all_schools2.csv")
+
+```
+
+## Issue with 2 points
+ 2 geocoded points are outside of Brazil, both from the first geocoding.
+
+ We will instead geocode these points using the school name and Municipality
+
+```{r geocode3}
+load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/complete_all_schools3.RData")
+
+
+all_schools$address <- paste(all_schools$name, ", ", all_schools$Municipality, ", ", all_schools$ADM1_PT, ", Brazil", sep = "")
+
+wrong_schools <- subset(all_schools, Endereço %in% c("AVENIDA EDESIO DE CARVALHO, 200 VILA MARCELA. 56350-000 Petrolina - PE.", "CAIXA POSTAL COMUNITARIA AVENIDA NORTE, 01 - LOTEAMENTO BEIJA-FLOR - CHA DE CRUZ, 21 LOTEAMENTO BEIJAFLOR. CHA DE CRUZ. 53590-990 Abreu e Lima - PE."))
+right_schools <- subset(all_schools, !(Endereço %in% c("AVENIDA EDESIO DE CARVALHO, 200 VILA MARCELA. 56350-000 Petrolina - PE.", "CAIXA POSTAL COMUNITARIA AVENIDA NORTE, 01 - LOTEAMENTO BEIJA-FLOR - CHA DE CRUZ, 21 LOTEAMENTO BEIJAFLOR. CHA DE CRUZ. 53590-990 Abreu e Lima - PE.")))
+
+wrong_schools[,c("X.chosen","Y.chosen")] <- geocode(wrong_schools, address, method = 'arcgis', lat = Latitude.new , long = Longitude.new)[,c("Longitude.new", "Latitude.new")]
+
+all_schools <- rbind(right_schools, wrong_schools)
+
+save(all_schools, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/correct_all_schools2.RData")
+
+load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/correct_all_schools2.RData")
+
+nrow(all_schools)
+nrow(unique(all_schools[,c("name", "X.chosen", "Y.chosen")]))
+
+
+nrow(all_schools)
+nrow(unique(all_schools[,c("Latitude")]))
+
+duplicates <- all_schools[duplicated(all_schools[,c("name","X.chosen","Y.chosen")]), ]
+plot(duplicates$Longitude, duplicates$Latitude)
+
+
+```
+
+
+# Plot
+
+```{r plot}
+
+Brazil <- st_read("/home/azureuser/cloudfiles/code/Users/ariley/Data/Shapefiles/BR_UF_2021/BR_UF_2021.shp")
+st_crs(Brazil)
+
+Brazil <- st_transform(Brazil, crs = "+proj=longlat +datum=WGS84 +no_defs +type=crs")
+
+unique(is.na(all_schools$X.chosen))
+
+hist(all_schools$X.chosen)
+hist(all_schools$Y.chosen)
+
+unique(is.na(all_schools$X.chosen))
+
+ggplot(Brazil) +
+  geom_sf() + coord_sf() +
+  geom_point(all_schools, mapping = aes(x = X.chosen, y = Y.chosen, color = coord_source))
+
+names(all_schools)
+
+schools_sf <- st_as_sf(all_schools, coords = c("X.chosen", "Y.chosen"), crs = "+proj=longlat +datum=WGS84 +no_defs +type=crs")
+
+st_write(schools_sf, "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Other_Schools/complete_all_schools2.csv")
+
+
+```

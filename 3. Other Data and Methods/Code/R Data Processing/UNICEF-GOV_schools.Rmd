@@ -1,0 +1,143 @@
+---
+title: "Cropped_Square"
+author: "Abi Riley"
+date: "2023-08-23"
+output: html_document
+bibliography: references.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## Load packages
+
+```{r packages}
+
+library(sf)
+library(ggplot2)
+library(stars)
+library(ggpubr)
+library(mapview)
+library(readr)
+#library(sp)
+
+```
+
+## Load school data 
+
+```{r school_data, echo = TRUE}
+
+#schools <- st_read("Data/Brazil/Grid_Square/schools_cropped.gpkg")
+  
+#schools_gov <- st_read("Data/Brazil/Grid_Square/schools_brgov_cropped.gpkg")
+#schools_unicef <- st_read("Data/Brazil/Grid_Square/schools_unicef_cropped.gpkg")
+
+schools_gov <- read_csv("UNICEF-ESA/Data/Brazil/Grid_Square/brgov_schools_cropped.csv")
+schools_unicef <- read_csv("UNICEF-ESA/Data/Brazil/Grid_Square/brgov_schools_cropped.csv"")
+
+```
+
+```{r data_fields, echo = TRUE}
+
+names(schools_gov)
+names(schools_unicef)
+
+schools_gov <- schools_gov[,c("Escola", "Localização", "Dependência.Administrativa", "Porte.da.Escola", "Latitude", "Longitude", "geom")]
+schools_gov$database <- "gov"
+schools_gov$gov.id <- 1:nrow(schools_gov)
+schools_gov$unicef.id <- NA
+
+schools_unicef <- schools_unicef[,c("name", "school_region", "school_type", "student_count", "lat", "lon", "geom", "database")]
+schools_unicef$database <- "unicef"
+schools_unicef$gov.id <- NA
+schools_unicef$unicef.id <- 1:nrow(schools_unicef)
+
+names(schools_gov) <- names(schools_unicef)
+
+schools_gov <- subset(schools_gov, !is.na(lat) & !is.na(lon))
+schools_unicef <- subset(schools_unicef, !is.na(lat) & !is.na(lon))
+
+schools <- rbind(schools_gov, schools_unicef)
+schools <- st_as_sf(schools, coords = c("lat", "lon"))
+
+ggplot() +
+  geom_sf(schools, mapping = aes(color = database)) +
+  #geom_sf_label(schools, mapping = aes(label = name)) +
+  coord_sf()
+```
+
+Get distances between the datasets and find close schools (< 100m)
+
+```{r distances}
+
+all_dists <- st_distance(schools)
+
+sep_dists <- st_distance(schools_gov, schools_unicef)
+matrix_dists <-  matrix(sep_dists, nrow = 173, ncol = 118)
+dists <- as.vector(sep_dists)
+hist(dists, breaks = c(0,5,10,15,20,25,30,35,40,45,50,100,200,1000,12000), xlim = c(0,100))
+
+min(na.omit(dists))
+
+close_schools <- which(matrix_dists < 20, arr.ind = TRUE) 
+names(close_schools) <- c("gov.id", "unicef.id")
+
+close_dists <- subset(dists, dists < 20)
+hist(close_dists)
+
+dup_schools <- subset(schools, gov.id %in% close_schools[,1] | unicef.id %in% close_schools[,2])
+
+ggplot() +
+  geom_sf(schools, mapping = aes(color = database)) +
+  #geom_sf_label(schools, mapping = aes(label = gov.id), color = "red") +
+  #geom_sf_label(schools, mapping = aes(label = unicef.id), color = "blue") +
+  coord_sf()
+
+ggplot() +
+  geom_sf(schools, mapping = aes(color = database)) 
+  #geom_sf_label(schools, mapping = aes(label = name), color = "red") +
+  #geom_sf_label(schools, mapping = aes(label = gov.id), color = "red") +
+  #geom_sf_label(schools, mapping = aes(label = unicef.id), color = "blue")
+
+mapview(schools, zcol = "database")
+
+matrix_dists[81,] < 12
+
+```
+
+```{r distances2}
+
+schools$id <- 1:nrow(schools)
+
+nearest <- st_nearest_feature(schools)
+schools <- cbind(schools, nearest, st_distance(schools, schools[nearest,], by_element = TRUE))
+names(schools)[12] <- "distance"
+schools$distance <- as.numeric(schools$distance)
+
+close_schools <- subset(schools, distance < 50)
+
+mapview(close_schools, zcol = "database")
+
+
+```
+
+```{r merge2}
+
+schools_gov <- st_read("Data/Brazil/Grid_Square/schools_brgov_cropped.gpkg")
+schools_unicef <- st_read("Data/Brazil/Grid_Square/schools_unicef_cropped.gpkg")
+schools_gov$database <- "gov"
+schools_gov$gov.id <- 1:nrow(schools_gov)
+schools_gov$unicef.id <- NA
+
+schools_unicef$database <- "unicef"
+schools_unicef$gov.id <- NA
+schools_unicef$unicef.id <- 1:nrow(schools_unicef)
+
+names(schools_gov) <- c("")
+
+schools_gov <- subset(schools_gov, !is.na(lat) & !is.na(lon))
+schools_unicef <- subset(schools_unicef, !is.na(lat) & !is.na(lon))
+
+```

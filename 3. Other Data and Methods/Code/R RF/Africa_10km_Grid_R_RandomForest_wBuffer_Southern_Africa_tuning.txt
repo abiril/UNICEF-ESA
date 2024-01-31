@@ -1,0 +1,295 @@
+####  Randon Forest in R
+
+setwd("/")
+
+library(readr)
+library(terra)
+library(randomForest)
+library(datasets)
+library(caret)
+library(sf)
+library(dplyr)
+library(ranger)  
+
+
+grid_data <- read.csv("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Gridded_10km_Data/Africa_Grid_Data_10km_wBuffer.csv")
+head(grid_data)
+
+names(grid_data)
+data <- grid_data[,-1]
+data <- na.omit(data)
+names(data)
+names(data)[c(10:17)] <- c("smod.10", "smod.11", "smod.12", "smod.13", "smod.21", "smod.22", "smod.23", "smod.30")
+data$SCHOOLS <- as.factor(ifelse(data$NUMPOINTS > 0, 1, 0))
+head(data)
+
+
+set.seed(23)
+##South Africa, Namibia, Botzwana, Zimbabwe
+countries <- c("BWA", "NAM", "ZAF", "ZWE") #2, 7, 13, 14
+n.countries <- c(2,7,13,14)
+unique(grid_data$country)
+
+
+### for africa
+africa.data <- subset(data, country %in% countries)
+ind <- sample(2, nrow(africa.data), replace = TRUE, prob = c(0.7, 0.3))
+africa.train <- africa.data[ind==1,]
+africa.test <- africa.data[ind==2,]
+
+n_features <- 14
+
+africa.rf1 <- ranger(SCHOOLS ~ x + y + land + pop + built_s + built_v + smod.10 + smod.11 + smod.12 + smod.13 + smod.21 + smod.22 + smod.23 + smod.30, 
+    data = africa.train,
+    mtry = floor(n_features / 3),
+    respect.unordered.factors = "order",
+    seed = 23
+)
+sqrt(africa.rf1$prediction.error)
+
+saveRDS(africa.rf1, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Southern_Africa_10km_school_count_RF_AllVars_wBuffer.rds")
+
+
+# number of trees ~ p x 10 
+# mtry ~ p/3 for regression
+# increase node size, reduces complexity but increases error
+# sample with or without replacement
+
+hyper_grid <- expand.grid(
+  mtry = floor(n_features * c(.01, .025, .05, .15, .10, .25, .333, .4, .5)),
+  min.node.size = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+  replace = c(TRUE, FALSE),
+  sample.fraction = c(.5, .63, .7, .8, .9),
+  rmse = NA
+)
+
+# execute full cartesian grid search
+for(i in seq_len(nrow(hyper_grid))) {
+  # fit model for ith hyperparameter combination
+  fit <- ranger(SCHOOLS ~ x + y + land + pop + built_s + built_v + smod.10 + smod.11 + smod.12 + smod.13 + smod.21 + smod.22 + smod.23 + smod.30, 
+    data = africa.train,
+    num.trees = n_features * 10,
+    mtry = hyper_grid$mtry[i],
+    min.node.size = hyper_grid$min.node.size[i],
+    replace = hyper_grid$replace[i],
+    sample.fraction = hyper_grid$sample.fraction[i],
+    verbose = FALSE,
+    seed = 23,
+    respect.unordered.factors = 'order',
+  )
+  # export OOB error 
+  hyper_grid$rmse[i] <- sqrt(fit$prediction.error)
+}
+
+saveRDS(hyper_grid, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Southern_Africa_10km_school_count_RF_AllVars_wBuffer_tuned_hyper_grid.rds")
+
+hyper_grid
+
+tuned_hyper <- hyper_grid %>%
+  arrange(rmse) %>%
+  mutate(perc_gain = (default_rmse - rmse) / default_rmse * 100) %>%
+  head(10)
+tuned_hyper
+
+tuned_hyper <- hyper_grid %>%
+  arrange(rmse)
+
+africa.rf2 <- ranger(SCHOOLS ~ x + y + land + pop + built_s + built_v + smod.10 + smod.11 + smod.12 + smod.13 + smod.21 + smod.22 + smod.23 + smod.30, 
+    data = africa.train,
+    mtry = tuned_hyper[1,1], min.node.size = tuned_hyper[1,2], replace = tuned_hyper[1,3], sample.fraction = tuned_hyper[1,4],
+    respect.unordered.factors = "order",
+    seed = 23
+)
+sqrt(africa.rf2$prediction.error)
+
+saveRDS(africa.rf2, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Southern_Africa_10km_school_count_RF_AllVars_wBuffer_tuned.rds")
+
+
+library(mlbench)
+library(randomForest)
+
+plot(africa.rf2)
+
+
+
+Africa <- st_read(dsn = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Shapefiles/Africa_Shapefile/Africa_Boundaries.shp")
+st_crs(Africa)
+#Africa <- st_transform(Africa, crs = "ESRI:54009")
+Africa_54009 <- st_transform(Africa, crs = "ESRI:54009")
+AOI <- subset(Africa_54009, ISO %in% countries)
+plot(AOI$geometry)
+
+p1 <- predict(africa.rf2, africa.train)
+trained <- cbind(p1, africa.train)
+confusionMatrix(trained$prediction, africa.train$SCHOOLS)
+
+nrow(africa.test)
+length(p2)
+names(p2)
+p2 <- predict(africa.rf2, africa.test)
+tested <- cbind(p2$predictions, africa.test$SCHOOLS)
+confusionMatrix(p2$prediction, africa.test$SCHOOLS)
+
+p3 <- predict(africa.rf2, africa.data)
+predicted <- cbind(p3, africa.data)
+confusionMatrix(predicted$prediction, africa.data$SCHOOLS)
+names(predicted)
+
+names(predicted)[1] <- "p3"
+predicted$diff <- as.factor(as.numeric(predicted$p3) - as.numeric(predicted$SCHOOLS))
+
+pred.sf <- st_as_sf(predicted, coords = c("x","y"), crs = "ESRI:54009")
+pred.africa <- st_intersection(pred.sf, AOI)
+
+pred.data <- cbind(st_drop_geometry(pred.africa), st_coordinates(pred.africa))
+
+
+
+saveRDS(pred.data, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs_10km_school_count_RF_Pred_All.RDS")
+
+
+
+names(pred.data)
+data <- pred.data[,c(25,26,1:24)]
+plot(data$X, data$Y)
+predicted.r <- rast(data, type = "xyz", crs = "ESRI:54009")
+
+saveRDS(predicted.r, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Southern_Africa_10km_school_count_RF_Pred_Raster.RDS")
+
+
+plot(predicted.r)
+
+
+#load(file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Southern_Africa_10km_school_count_RF_Pred_Raster.RData")
+
+
+#### probability prediction
+p4 <- predict(africa.rf2, africa.data, type = "prob")
+predicted.probs <- cbind(p4, africa.data)
+
+    #AOI <- subset(Africa, ISO3 == countries)
+    #AOI <- st_transform(AOI, crs = "ESRI:54009")
+
+pred.sf <- st_as_sf(predicted.probs, coords = c("x","y"), crs = "ESRI:54009")
+st_crs(pred.sf) <- "ESRI:54009"
+pred.country <- st_intersection(pred.sf, AOI)
+pred.data <- cbind(st_drop_geometry(pred.country), st_coordinates(pred.country))
+
+names(pred.data)
+head(predicted.probs)
+pred.prob.r <- rast(predicted.probs[,c(3,4,1,2,4:21)], type = 'xyz', crs = "ESRI:54009")
+#pred.prob.r <- rast(pred.data[,c(43,44,1:42)], type = 'xyz', crs = "ESRI:54009")
+
+plot(pred.prob.r)
+
+pred.prob.data <- as.data.frame(pred.prob.r, cell = TRUE, xy = TRUE)
+head(pred.prob.data)
+names(pred.prob.data)
+
+names(pred.prob.data)[c(4,5)] <- c("prob_0", "prob_1")
+pred.prob.data$pred.schools <- ifelse(pred.prob.data$SCHOOLS == 1 | is.na(pred.prob.data$SCHOOLS), NA, pred.prob.data$prob_1)
+hist(pred.prob.data$pred.schools)
+
+head(pred.prob.data)
+names(pred.prob.data)
+prob.r <- rast(pred.prob.data[,c(2,3,1,4:24)], type = 'xyz', crs = "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs", digits = 6, extent = NULL)
+plot(prob.r$pred.schools)
+
+head(pred.prob.data)
+
+quant <- quantile(pred.prob.data[,"prob_1"], probs = c(0.8, 0.9, 0.95, 0.975, 0.99, 0.999, 1), na.rm = TRUE)
+quant[1]
+
+pred.prob.data$sig.prob_0.2 <- ifelse(pred.prob.data$prob_1 < quant[1], NA, pred.prob.data$prob_1)
+pred.prob.data$sig.prob_0.1 <- ifelse(pred.prob.data$prob_1 < quant[2], NA, pred.prob.data$prob_1)
+pred.prob.data$sig.prob_0.05 <- ifelse(pred.prob.data$prob_1 < quant[3], NA, pred.prob.data$prob_1)
+pred.prob.data$sig.prob_0.025 <- ifelse(pred.prob.data$prob_1 < quant[4], NA, pred.prob.data$prob_1)
+pred.prob.data$sig.prob_0.01 <- ifelse(pred.prob.data$prob_1 < quant[5], NA, pred.prob.data$prob_1)
+pred.prob.data$sig.prob_0.001 <- ifelse(pred.prob.data$prob_1 < quant[6], NA, pred.prob.data$prob_1)
+
+prob.pred <- pred.prob.data
+save(pred.prob.data, file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Southern_Africa_10km_school_count_RF_Pred_Probs_wBuffer_", countries,".RData", sep = ""))
+
+
+    head(pred.prob.data)
+    prob.r <- rast(pred.prob.data[,c(2,3,1,4:29)], type = 'xyz', crs = "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs", digits = 6, extent = NULL)
+    prob.pred.r <- prob.r
+}
+
+head(prob.pred.r[[1]])
+plot(prob.pred.r[[1]]$sig.prob_0.05)
+head(prob.pred[[1]])
+
+library(stars)
+library(dplyr)
+
+Africa <- st_read(dsn = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Shapefiles/Africa_Shapefile/Africa_Boundaries.shp")
+names(Africa)
+st_crs(Africa)
+Africa_54009 <- st_transform(Africa, crs = "ESRI:54009")
+st_bbox(Africa_54009)
+-5875450    4514869
+
+range(pred.all$X)
+
+africa.r <- st_as_stars(st_rasterize(Africa_54009, crs = "ESRI:54009", 
+            nx = 930, ny = 1050, xlim = c(-2500000, 6800000), ylim = c(-5900000, 4600000)))
+
+plot(africa.r)
+countries.id <- unique(st_drop_geometry(Africa[,c("OBJECTID", "ISO")]))
+names(countries.id)
+
+for(i in 1:14){
+    load(file = paste("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Southern_Africa_10km_school_count_RF_Pred_Probs_wBuffer_", countries,".RData", sep = ""))
+    prob.pred <- pred.prob.data
+
+    prob.pred$OBJECTID <- st_extract(africa.r, st_as_sf(prob.pred, coords = c("x","y"), crs = "ESRI:54009"))$OBJECTID
+    prob.pred <- left_join(prob.pred, countries.id, by = "OBJECTID")
+
+    prob.pred <- subset(prob.pred, ISO == names(which.max(table(data.frame(factor(prob.pred$ISO))))))
+    prob.pred.r <- rast(prob.pred[,c(2,3,1,4:32)], type = 'xyz', crs = "+proj=moll +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs", digits = 6, extent = NULL)
+
+}
+
+names(prob.pred[[1]])
+unique(prob.pred[[1]]$ISO)
+
+plot(prob.pred.r[[2]])
+
+
+par(mfrow = c(2,3))
+plot(prob.r$sig.prob_0.2)
+plot(prob.r$sig.prob_0.1)
+plot(prob.r$sig.prob_0.05)
+plot(prob.r$sig.prob_0.025)
+plot(prob.r$sig.prob_0.01)
+plot(prob.r$sig.prob_0.001)
+
+
+all.pred <- do.call(rbind, predicted.probs)
+ggplot(Africa$geometry) + geom_sf() + coord_sf() + 
+    geom_point(all.pred, mapping = aes(x = x, y = y))
+
+st_crs(Africa)
+
+ggplot(AOI[[14]]$geometry) + geom_sf() + coord_sf() + 
+    geom_point(africa.data[[14]], mapping = aes(x = x, y = y))
+
+all.pred.prob <- do.call(rbind, prob.pred)
+save(all.pred.prob, file = "/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Southern_Africa_10km_school_count_RF_Pred_Probs_wBuffer.RData")
+
+head(all.pred.prob)
+head(prob.pred[[2]])
+
+### need to crop to countries
+
+head(all.pred.prob)
+p1 <- ggplot() +
+    #geom_sf() + coord_sf() +
+    geom_raster(all.pred.prob, mapping = aes(x = x, y = y, color = pred.schools, fill = sig.prob_0.025)) +
+    scale_fill_viridis_c(option = "C") +
+    facet_wrap(~ ISO, scales = "free")
+p1
+
+ggsave("/home/azureuser/cloudfiles/code/Users/ariley/Data/Schools/Africa/School_Counts/Outputs/Southern_Africa_10km_school_count_RF_Pred_Probs_wBuffer_95plot.png", plot = p1)
+
