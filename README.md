@@ -6,4 +6,4 @@ Under Construction!
 
 I will lay out the work I have done, signpost to interesting things, and how to run the main models.
 
-This will be linked to the paper in progress.
+This will be linked to the paper in progress: 'Modelling Priority Areas for Improving Global School Access: A Geostatistical Machine Learning Approach'
