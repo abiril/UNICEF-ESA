@@ -12,13 +12,13 @@ Improving access to quality, modern education is a key target of the United Nati
 ## GitHub Structure
 
 ```md
-├── 1. School Datasets and Grid Data
+├── 1. School Datasets and Grid Data   # Creating, cleaning, joining, validating school datasets and the grid data
 │  ├── Code
 │  └── Data
 |  |  ├── Africa
 |  |  └── Brazil
-├── 2. School Counts Models
-│  ├── Code
+├── 2. School Counts Models            # Main body of work: Random Forest classification and regression for school 
+│  ├── Code                              counts data
 |  |  ├── Examples
 |  |  └── General
 │  ├── Data
@@ -29,7 +29,7 @@ Improving access to quality, modern education is a key target of the United Nati
 |  ├── Outputs
 |  ├── Plots 
 │  └── Working Outputs
-├── 3. Other Data and Methods
+├── 3. Other Data and Methods          # Background work, other data processing, other models, etc
 │  ├── Code
 |  |  ├── Python Compare
 |  |  ├── Python PyTorch
@@ -43,17 +43,3 @@ Improving access to quality, modern education is a key target of the United Nati
 │   └── Plots
 └── README.md
 ```
-
-
-3. Other Data and Methods
-  * Code
-    * Python Compare
-    * Python PyTorch
-    * Python RF
-    * R Data Processing
-    * R RF
-    * R rTorch
-  * Data
-    * Africa
-    * Brazil
-  * Plots
